@@ -1,0 +1,1897 @@
+---
+title: "D3C Statistical Analysis - Microbiome Submission"
+author: "Lexi Ardissone"
+date: "6/2/2017"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  html_document:
+    toc: yes
+    toc_depth: 4
+---
+
+```{r setup, include=FALSE}
+library(knitr)
+knitr::opts_chunk$set(cache=T, warning=FALSE, message=FALSE, echo=TRUE, cache.lazy=FALSE) 
+knitr::opts_chunk$set(cache.path = '/tmp/knitrcache33')
+library(ggthemr)
+ggthemr('fresh')
+#use ggthemr_reset() to clear theme
+
+#color palette hex codes
+fresh9 = c("#65ADC2", "#233B43", "#E84646", "#C29365", "#362C21", "#316675", "#168E7F", "#109B37", "#000000")
+```
+
+---
+
+#Input & Data Preparation
+
+###Packages & Functions
+
+```{r source}
+source('AdditionalFile4/inputs/D3C_functions_5.0.R')
+```
+
+Below is a list of the R packages used in this analysis and are called in the source above. Appropriate references for these packages can be found in the *References* section at the end of this doucment. Also, the source provides specific functions that were written for this project; an attempt to note the usage of these functions will be made throughout this document.
+
+- *knitr*
+- *phyloseq*
+- *ggplot2*
+- *gridExtra*
+- *plyr*
+- *reshape2*
+- *lubridate*
+- *vegan*
+- *geepack*
+- *gdata*
+
+
+###Input Data
+
+In this project, the V4 region of the 16S rRNA gene was amplified and sequenced using 2x100 paired-end sequencing on the Illumina HiSeq 2000 platform. The raw sequence data for this project has been deposited in NCBI's SRA under [BioProject PRJNA232731](https://www.ncbi.nlm.nih.gov/bioproject/PRJNA232731). 
+
+Sequence preprocessing involved quality filtering and trimming (detailed in [Davis-Richardson *et al.*](http://journal.frontiersin.org/article/10.3389/fmicb.2014.00678/full)), and the removal of samples with fewer than 20,000 reads (n = 6). This resulted in an average of 337,100 (±181,094) reads per sample with an average length of 2x98 (±3) nucleotides. OTUs were assigned and quantified by aligning sequences to the [GreenGenes](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC1489311/) 97% representatives set version 13.8 (currently provided by [Qiime](http://qiime.org/home_static/dataFiles.html)) using the [USEARCH](https://www.ncbi.nlm.nih.gov/pubmed/20709691) program version 6.022. Taxonomic assignment of sequences required a minimum of 97% identity and 95% query coverage identifying a total of 49,455 OTUs after singletons were removed.
+
+OTU filtering was applied based on evaluation of technical replicates; the details of the process can be found in Additional file 3. The primary input file for the analyses presented in this document are provided as Additional document 2.
+    
+```{r data_import}
+load('~AdditionalFile2/dipp.sam3.genfilt.Rdata')
+dipp.sam3.genfilt
+```
+
+###Data Preparation
+
+>Handling technical replicates
+
+In the ```dipp.sam3.genfilt``` phyloseq object, there are ```r nsamples(dipp.sam3.genfilt)``` samples, which include technical replicates. However, there are only ```r length(unique(sample_data(dipp.sam3.genfilt)$sample_id))``` unique samples in this data set. 
+
+```{r merge_TechReps}
+#merge samples that were replicated 
+dipp.TR = merge_samples(dipp.sam3.genfilt, "sample_id")
+  ##this function sums read counts, but ultimately proportions will be used, 
+  ##and differences in counts/sequencing effort would be of little concern.
+  ##However, this would affect alpha diversity, so these samples are excluded from those measures
+  #Note: illumina_id variable is lost and factor variables are converted to integers
+dipp.TR
+```
+
+
+>Distribution of sample counts
+
+Although samples with fewer than 20,000 rads were initially excluded, this was applied prior to the removal of OTUs with high technical variability. Therefore, this section describes the total number of reads per sample used for further statistical analyses. Note, counts for replicated samples are inflated so are excluded here.
+
+Summary statisitics for all read counts of all samples (N=1,494):
+
+```{r count_summary, echo=FALSE}
+dipp.nTR = subset_samples(dipp.TR, TechReps=='0')
+summary(sample_sums(dipp.nTR))
+```
+
+```{r sample_count_summary, fig.width=10, echo=FALSE, fig.height=5}
+x = data.frame(sample_sums(dipp.nTR))
+names(x) = c('counts')
+ggplot(x, aes(counts, fill='grey')) +
+  geom_histogram(binwidth=25000) +
+  theme_bw() +
+  xlab('Read Counts (thousands)') +
+  theme(legend.position = 'none') +
+  scale_x_continuous(labels=seq(0,1150, 50), breaks=seq(0,1150000, 50000)) +
+  scale_y_continuous(labels=seq(0,150, 25), breaks=seq(0,150, 25)) +
+  ggtitle("Read Count Distribution")
+```
+
+>Agglomerate taxa
+
+Now that technical replicates have been dealt with,  counts were transformed to proportions and using the ```tax_glom()``` function in the *phyloseq* package, OTUs were collapsed to phyla, family, genus, and species taxonomies. Warning: this chunk takes ~20-30 minutes to run.
+
+```{r tax_glom}
+dipp.TR.prop = transform_sample_counts(dipp.TR, function(x) x/sum(x))
+dipp.p = tax_glom(dipp.TR.prop, 'Phylum')
+dipp.f = tax_glom(dipp.TR.prop, 'Family')
+dipp.g = tax_glom(dipp.TR.prop, 'Genus')
+dipp.s = tax_glom(dipp.TR.prop, 'Species')
+
+#this chunk takes several minutes to run; can export/save objects and call later for easier use
+```
+
+
+The table below enumerates the number of features at each taxonomic levels that were subject to analyses:
+
+Level | Number of Taxa
+--- | ---
+Phylum | ```r ntaxa(dipp.p)```
+Family | ```r ntaxa(dipp.f)```
+Genus | ```r ntaxa(dipp.g)```
+Species | ```r ntaxa(dipp.s)```
+OTU | ```r ntaxa(dipp.TR.prop)```
+
+
+>Extract sample/subject data
+
+Subject- and sample-specific meta data was extracted in order to evaluate the cohort. Additional variables were also generated in order to facilitate plotting. These included site-specific inner-quartile ranges (IQRs) and medians for the appearance of the first autoantibody, and a final_status variable. For aesthetic reasons, this code is included in the .Rmd file but not displayed in this document.
+
+```{r metadata, echo=FALSE}
+#add initial read count variable
+sample_data(dipp.TR)$total_reads_postproc = sample_sums(dipp.TR)
+
+#extract sample-specific data
+dipp.samp = data.frame(sample_data(dipp.TR))
+
+#replace variables
+dipp.samp$site = factor(dipp.samp$site, labels=c('Oulu', 'Tampere', 'Turku'))
+dipp.samp$seroconverted = as.logical(dipp.samp$seroconverted)
+
+#extract subject-specific data
+dipp.sub = dipp.samp[!duplicated(dipp.samp$mask_id),]
+
+#create final_status factor, variable
+dipp.samp$final_status[dipp.samp$seroconverted == FALSE] <- 'Control' 
+dipp.samp$final_status[dipp.samp$seroconverted == TRUE] <- 'Seroconverted' 
+dipp.samp$final_status[dipp.samp$has_T1D == TRUE] <- 'T1D cases' 
+dipp.samp$final_status = as.factor(dipp.samp$final_status)
+
+#create age_month variable, discrete ages
+dipp.samp$age_month = round(dipp.samp$age_at_sampling/30.5, 0)
+
+#receiving brest milk variable
+dipp.samp$BM = (as.numeric(dipp.samp$age_month)+2) - dipp.samp$Duration_Breast_Feeding_months
+dipp.samp$receiving_breast_milk[dipp.samp$BM <= 0] <- 'TRUE'
+dipp.samp$receiving_breast_milk[dipp.samp$BM > 0] <- 'FALSE'
+dipp.samp$receiving_breast_milk = as.logical(dipp.samp$receiving_breast_milk)
+dipp.samp$BM = NULL
+
+#add SC IQRs by ste
+##these variables are used to plot the vertical lines indicating the IQR for the age of the first autoantibody
+dipp.samp$SeroSiteMed[dipp.samp$site == 'Oulu'] = median(dipp.sub[dipp.sub$site == 'Oulu',]$age_first_sc, na.rm=TRUE)
+dipp.samp$SeroSiteMed[dipp.samp$site == 'Tampere'] = median(dipp.sub[dipp.sub$site == 'Tampere',]$age_first_sc, na.rm=TRUE)
+dipp.samp$SeroSiteMed[dipp.samp$site == 'Turku'] = median(dipp.sub[dipp.sub$site == 'Turku',]$age_first_sc, na.rm=TRUE)
+dipp.samp$SeroSite1stIQR[dipp.samp$site == 'Oulu'] = quantile(dipp.sub[dipp.sub$site == 'Oulu',]$age_first_sc, na.rm=TRUE)[2]
+dipp.samp$SeroSite1stIQR[dipp.samp$site == 'Tampere'] = quantile(dipp.sub[dipp.sub$site == 'Tampere',]$age_first_sc, na.rm=TRUE)[2]
+dipp.samp$SeroSite1stIQR[dipp.samp$site == 'Turku'] = quantile(dipp.sub[dipp.sub$site == 'Turku',]$age_first_sc, na.rm=TRUE)[2]
+dipp.samp$SeroSite3rdIQR[dipp.samp$site == 'Oulu'] = quantile(dipp.sub[dipp.sub$site == 'Oulu',]$age_first_sc, na.rm=TRUE)[4]
+dipp.samp$SeroSite3rdIQR[dipp.samp$site == 'Tampere'] = quantile(dipp.sub[dipp.sub$site == 'Tampere',]$age_first_sc, na.rm=TRUE)[4]
+dipp.samp$SeroSite3rdIQR[dipp.samp$site == 'Turku'] = quantile(dipp.sub[dipp.sub$site == 'Turku',]$age_first_sc, na.rm=TRUE)[4]
+
+#re-extract subject-specific data containing added variables
+dipp.sub = dipp.samp[!duplicated(dipp.samp$mask_id),]
+
+#replace sample_data in phyloseq objects with updated version
+dipp.TR = phyloseq(otu_table(dipp.TR), sample_data(dipp.samp), tax_table(dipp.TR))
+dipp.TR.prop = phyloseq(otu_table(dipp.TR.prop), sample_data(dipp.samp), tax_table(dipp.TR.prop))
+dipp.nTR = phyloseq(otu_table(dipp.nTR), sample_data(dipp.samp), tax_table(dipp.nTR))
+dipp.p = phyloseq(otu_table(dipp.p), sample_data(dipp.samp), tax_table(dipp.p))
+dipp.f = phyloseq(otu_table(dipp.f), sample_data(dipp.samp), tax_table(dipp.f))
+dipp.g = phyloseq(otu_table(dipp.g), sample_data(dipp.samp), tax_table(dipp.g))
+dipp.s = phyloseq(otu_table(dipp.s), sample_data(dipp.samp), tax_table(dipp.s))
+```
+
+```{r convert_sample_data_to_categorical, echo=FALSE}
+#in the merge_samples function, categorical sample data was converted to numeric and labels were lost
+#to preserve this, these variables are changed back here
+
+##DQB1_cat
+dipp.samp$DQB1_cat = factor(dipp.samp$DQB1_cat, labels=c('high', 'low', 'moderate'))
+dipp.samp$DQB1_cat = factor(dipp.samp$DQB1_cat, levels=c('high', 'moderate', 'low'))
+dipp.sub$DQB1_cat = factor(dipp.sub$DQB1_cat, labels=c('high', 'low', 'moderate'))
+dipp.sub$DQB1_cat = factor(dipp.sub$DQB1_cat,  levels=c('high', 'moderate', 'low'))
+##MoD_simp
+  #2 indicates unknown which were verified to be vaginal MoD
+dipp.samp$MoD_simp = factor(round(dipp.samp$MoD_simp/3), labels=c('C-section', 'Vaginal'))
+dipp.sub$MoD_simp = factor(round(dipp.sub$MoD_simp/3), labels=c('C-section', 'Vaginal'))
+
+##Gender
+dipp.samp$Gender = factor(dipp.samp$Gender, labels=c('Female', 'Male'))
+dipp.sub$Gender = factor(dipp.sub$Gender, labels=c('Female', 'Male'))
+
+##Breast_feeding_any
+dipp.samp$Breast_feeding_any = factor(dipp.samp$Breast_feeding_any, labels=c('None', 'Some'))
+dipp.sub$Breast_feeding_any = factor(dipp.sub$Breast_feeding_any, labels=c('None', 'Some'))
+```
+
+
+###Figure 1 - Sampling plot
+
+```{r figure1_sampling, fig.width = 15, fig.height=10}
+#Define color palette
+fresh_swap= c('#233B43', '#65ADC2', '#E84646')
+
+#plot 
+ggplot(dipp.samp, aes(factor(mask_id), age_at_sampling, shape=final_status, color=final_status)) + 
+  #PLOT BASICS
+  geom_point(size=3) + 
+  coord_flip() +
+  scale_color_manual(values = fresh_swap, name='Final Status') +
+  scale_shape_discrete(name='Final Status') +
+  theme_bw() +
+  theme(legend.position = 'bottom', legend.title=element_blank()) +
+  #guide_legend(title = 'Final Status', title.position = 'bottom') +
+  # guide=guide_legend(title='Final Status', title.position='bottom') 
+  facet_wrap(~site, scales='free') +
+  #SC ANNOTATION
+  geom_rect(aes(ymin=SeroSite1stIQR, ymax=SeroSite3rdIQR, xmin=-Inf, xmax=Inf), 
+            fill='grey', alpha=0.2, color='blue', lty='dashed') +
+  geom_hline(aes(yintercept=SeroSiteMed), color='blue') +
+  #GRID LAYOUT
+  geom_hline(yintercept=seq(90,750, by=30.5), linetype='dashed', color='black') +
+  geom_vline(xintercept=seq(0,134, by=1), linetype='dashed', color='gray') +
+  #AXES LABELS & TITLE
+  scale_y_continuous(breaks=seq(90,750, by=30.5), labels=seq(3,24,1)) +
+  ylab("Age at sampling (months)") +
+  xlab("Subject") + 
+  ggtitle('DIPP 3 Cities Sampling Frequency for samples included in analyses') +
+  geom_point(size=3)
+
+```
+
+**Figure 1.** ***Sampling frequency*** A total of 132 subject were sampled from Oulu, Tampere, and Turku, Finland. Samples were collected between 3 and 24 months of age (vertical, dashed lines indicate monthly intervals). Each point represents a unique sample and each row represents a unique subject, which are ordered by those that did not develop autoantibodies (Control, dark blue circles), those that developed 2 or more persistent autoantibodies but did not progress to T1D (Seroconverted, light blue triangles), and those that developed 2 or more autoantibodies and progressed to T1D (T1D cases, red squares). The median age at which the first autoantibody appeared in each site is represented by the solid blue lines, and the inner-quartile range is represented by the light gray, shaded region with blue, dashed perimeter.
+
+---
+
+#Comparison of Sample Data between Cities
+
+##Potential Confounders
+
+There are several environmental factors that can influence microbial composition. Therefore, in this section variables of interest are evaluated and any differences in the distribution of these variables and islet autoimmunity outcome are considered. Additionally, differences between cities are also considered as this could confound comparisons between cases and controls between sites. 
+
+Code for generating table and plots in this section are supressed for aesthetic reasons but are available in Rmarkdown. Code for all statistical tests is displayed.
+
+>**HLA risk group**
+
+Type 1 diabetes is known to have a strong genetic component with the most risk conferred by HLA genes. Enrollment and selection of subjects to participate in the DIPP cohort was based on HLA predispostion for T1D based on HLA genotype. Initially, the HLA-DQB1 genotype was provided. However to simplfy analysis, this variable was recategorized based on level of risk as suggested by [Kukko **et al.** (2004)](https://www.ncbi.nlm.nih.gov/pubmed/14988284) and [Bakhtadze **et al.** (2006)](https://www.ncbi.nlm.nih.gov/pubmed/16783473) according to the following:
+
+Risk level category | HLA-DQB1 genotypes
+--- | ---
+High | 02/0302; 0201/0302	
+Moderate | 0302; 0302/0303; 0302/0501; 0302/0603; 0302/0604
+Slight | 02; 02/0303; 02/0604; 0301/0302; 0301/0303
+
+Overall, there is no difference in HLA-DQB1 genotype risk category between seroconverted subjects and those that do not seroconvert within each site. 
+
+```{r hla_table, echo=FALSE}
+dqb1.oulu = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Oulu',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Oulu',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted))
+dqb1.tampere = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Tampere',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Tampere',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted))
+dqb1.turku = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Turku',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Turku',]$DQB1_cat, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted))
+dqb1.table = data.frame(cbind(round(dqb1.oulu, 0), 
+                              round(dqb1.tampere, 0),
+                              round(dqb1.turku, 0)), 
+                        row.names=c('High (%)', 'High (N)', 'Moderate (%)', 'Moderate (N)', 'Slight (%)', 'Slight (N)'))
+names(dqb1.table) = c('Oulu Controls', 'Oulu Cases', 'Tampere Controls', 'Tampere Cases', 'Turku Controls', 'Turku Cases')
+
+kable(dqb1.table)
+```
+
+```{r hla_plot, fig.height=3, echo=FALSE}
+dqb1.plot = melt(dqb1.table[c(1,3,5),])
+dqb1.plot$DQB1_cat = rep(c('High', 'Moderate', 'Slight'), 6)
+dqb1.plot$seroconverted = rep(c('FALSE', 'TRUE'), 3, each=3)
+dqb1.plot$site = rep(c('Oulu', 'Tampere', 'Turku'), 1, each=6)
+
+
+ggplot(dqb1.plot, aes(seroconverted, value, fill=DQB1_cat)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~site) +
+  scale_fill_manual(values = c("#E84646", "#65ADC2", "#233B43")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects')
+```
+
+
+```{r hla_test}
+#different between all cases and controls? --> no quite
+fisher.test(table(dipp.sub$seroconverted, dipp.sub$DQB1_cat))
+
+#different between sites? --> NO
+fisher.test(table(dipp.sub$site, dipp.sub$DQB1_cat))
+
+#different between cases and controls within site? --> NO
+##Oulu
+fisher.test(table(dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted, dipp.sub[dipp.sub$site == 'Oulu',]$DQB1_cat))
+##Tampere
+fisher.test(table(dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted, dipp.sub[dipp.sub$site == 'Tampere',]$DQB1_cat))
+##Turku
+fisher.test(table(dipp.sub[dipp.sub$site == 'Turku',]$seroconverted, dipp.sub[dipp.sub$site == 'Turku',]$DQB1_cat))
+```
+
+>**Gender**
+
+```{r gender_table, echo=FALSE}
+dipp.sub$Gender = factor(dipp.sub$Gender, levels=c('Male', 'Female'))
+gender.oulu = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Oulu',]$Gender, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Oulu',]$Gender, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted))
+gender.tampere = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Tampere',]$Gender, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Tampere',]$Gender, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted))
+gender.turku = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Turku',]$Gender, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Turku',]$Gender, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted))
+gender.table = data.frame(cbind(round(gender.oulu, 0), 
+                                round(gender.tampere, 0), 
+                                round(gender.turku, 0)), 
+                          row.names=c('Male (%)', 'Male (N)', 'Female (%)', 'Female (N)'))
+names(gender.table) = c('Oulu Controls', 'Oulu Cases', 'Tampere Controls', 'Tampere Cases', 'Turku Controls', 'Turku Cases')
+
+kable(gender.table)
+```
+
+```{r gender_plot, fig.height=3, echo=FALSE}
+gender.plot = melt(gender.table[c(1,3),])
+gender.plot$Gender = rep(c('Male', 'Female'), 6)
+gender.plot$seroconverted = rep(c('FALSE', 'TRUE'), 3, each=2)
+gender.plot$site = rep(c('Oulu', 'Tampere', 'Turku'), 1, each=4)
+
+
+ggplot(gender.plot, aes(seroconverted, value, fill=Gender)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~site) +
+  scale_fill_manual(values = c("#E84646", "#65ADC2", "#233B43")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects')
+```
+
+```{r gender_test}
+#different between all cases and controls? --> NO
+fisher.test(table(dipp.sub$seroconverted, dipp.sub$Gender))
+
+#different between sites? --> NO
+fisher.test(table(dipp.sub$site, dipp.sub$Gender))
+
+#different between cases and controls within site? --> NO
+##Oulu
+fisher.test(table(dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted, dipp.sub[dipp.sub$site == 'Oulu',]$Gender))
+##Tampere
+fisher.test(table(dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted, dipp.sub[dipp.sub$site == 'Tampere',]$Gender))
+##Turku
+fisher.test(table(dipp.sub[dipp.sub$site == 'Turku',]$seroconverted, dipp.sub[dipp.sub$site == 'Turku',]$Gender))
+```
+
+
+>**Mode of delivery**
+
+```{r MoD_table, echo=FALSE}
+dipp.sub$MoD_simp = factor(dipp.sub$MoD_simp, levels=c('Vaginal', 'C-section'))
+MoD.oulu = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Oulu',]$MoD_simp, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Oulu',]$MoD_simp, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted))
+MoD.tampere = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Tampere',]$MoD_simp, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Tampere',]$MoD_simp, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted))
+MoD.turku = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Turku',]$MoD_simp, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Turku',]$MoD_simp, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted))
+MoD.table = data.frame(cbind(round(MoD.oulu, 0), 
+                             round(MoD.tampere, 0),
+                             round(MoD.turku, 0)), 
+                       row.names=c('Vaginal (%)', 'Vaginal (N)', 'C-section (%)', 'C-section (N)'))
+names(MoD.table) = c('Oulu Controls', 'Oulu Cases', 'Tampere Controls', 'Tampere Cases', 'Turku Controls', 'Turku Cases')
+
+kable(MoD.table)
+```
+
+```{r MoD_plot, fig.height=3, echo=FALSE}
+MoD.plot = melt(MoD.table[c(1,3),])
+MoD.plot$MoD = rep(c('Vaginal', 'C-section'), 6)
+MoD.plot$seroconverted = rep(c('FALSE', 'TRUE'), 3, each=2)
+MoD.plot$site = rep(c('Oulu', 'Tampere', 'Turku'), 1, each=4)
+
+
+ggplot(MoD.plot, aes(seroconverted, value, fill=MoD)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~site) +
+  scale_fill_manual(values = c("#E84646", "#65ADC2", "#233B43")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects')
+```
+
+```{r MoD_test}
+#different between all cases and controls? --> NO
+fisher.test(table(dipp.sub$seroconverted, dipp.sub$MoD_simp))
+
+#different between sites? --> NO
+fisher.test(table(dipp.sub$site, dipp.sub$MoD_simp))
+
+#different between cases and controls within site? --> NO
+##Oulu
+fisher.test(table(dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted, dipp.sub[dipp.sub$site == 'Oulu',]$MoD_simp))
+##Tampere
+fisher.test(table(dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted, dipp.sub[dipp.sub$site == 'Tampere',]$MoD_simp))
+##Turku
+fisher.test(table(dipp.sub[dipp.sub$site == 'Turku',]$seroconverted, dipp.sub[dipp.sub$site == 'Turku',]$MoD_simp))
+```
+
+>**Early feeding habits**
+
+```{r BF_table, echo=FALSE}
+#Breast Feeding Prevalence (nearly 100%)
+BF.oulu = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Oulu',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Oulu',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted))
+BF.tampere = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Tampere',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Tampere',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted))
+BF.turku = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Turku',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Turku',]$Breast_feeding_any, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted))
+BF.table = data.frame(cbind(BF.oulu[3:4,], BF.tampere[3:4,], BF.turku[3:4,]), row.names=c('Breast feeding prevalence (%)', '(N)'))
+
+###
+#exclude subjects that were NOT breast fed
+dipp.sub.BF = dipp.sub[dipp.sub$Breast_feeding_any == 'Some',]
+
+#Duration of excusive breast feeding
+BF.excl = ddply(dipp.sub.BF, ~site+seroconverted, function(x) c(median=round(median(x$Duration_exclusive_breast_feeding_weeks, na.rm=TRUE)), 
+                                                      IQR1 = round(quantile(x$Duration_exclusive_breast_feeding_weeks, na.rm=TRUE)[2]),
+                                                      IQR3 = round(quantile(x$Duration_exclusive_breast_feeding_weeks, na.rm=TRUE)[4])))
+BF.excl$IQR = paste('(', BF.excl$`IQR1.25%`, ':', BF.excl$`IQR3.75%`, ')', sep='')
+
+#Duration of any breast feeding
+BF.any = ddply(dipp.sub.BF, ~site+seroconverted, function(x) c(median=round(median(x$Duration_Breast_Feeding_months, na.rm=TRUE)), 
+                                                      IQR1 = round(quantile(x$Duration_Breast_Feeding_months, na.rm=TRUE)[2]),
+                                                      IQR3 = round(quantile(x$Duration_Breast_Feeding_months, na.rm=TRUE)[4])))
+BF.any$IQR = paste('(', BF.any$`IQR1.25%`, ':', BF.any$`IQR3.75%`, ')', sep='')
+#merge
+BF.complete = data.frame(rbind(round(BF.table, 1), 
+                                      "Median duration of exclusive breastfeeding (weeks)"=BF.excl[,3],
+                                      "IQR duration of exclusive breastfeeding (weeks)"=BF.excl[,6],
+                                      "Median duration of any breastfeeding (months)"=BF.any[,3],
+                                      "IQR duration of any breastfeeding (months)"=BF.any[,6]))
+names(BF.complete) = c('Oulu Controls', 'Oulu Cases', 'Tampere Controls', 'Tampere Cases', 'Turku Controls', 'Turku Cases')
+kable(BF.complete)
+```
+
+```{r BF_plot, fig.height=4, echo=FALSE, fig.width=15}
+#prevalence of any breast feeding
+BF.plot = melt(BF.table[1,])
+BF.plot$seroconverted = rep(c('FALSE', 'TRUE'), 3, each=1)
+BF.plot$site = rep(c('Oulu', 'Tampere', 'Turku'), 1, each=2)
+
+
+BF.p1 = ggplot(BF.plot, aes(seroconverted, value, fill=seroconverted)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~site) +
+  scale_fill_manual(values = c("#233B43", "#E84646", "#65ADC2")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects')
+#########################################################
+#Duration of exclusive breast feeding
+BF.p2 = ggplot(dipp.sub.BF, aes(seroconverted, Duration_exclusive_breast_feeding_weeks, color=seroconverted)) + 
+  geom_boxplot(size=1, fill='white') +
+  facet_wrap(~site) +
+  theme_bw() +
+  ylab('Duration of exclusive \nbreast feeding (weeks)') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2"))
+#########################################################
+#Duration of any breast feeding
+BF.p3 = ggplot(dipp.sub.BF, aes(seroconverted, Duration_Breast_Feeding_months, color=seroconverted)) + 
+  geom_boxplot(size=1, fill='white') +
+  facet_wrap(~site) +
+  theme_bw() +
+  ylab('Duration of any \nbreast feeding (months)') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2"))
+
+grid.arrange(BF.p1, ncol=2)
+grid.arrange(BF.p2, BF.p3, ncol=2)
+```
+
+```{r BF_test}
+#Breast feeding prevalence
+#different between all cases and controls? --> NO
+fisher.test(table(dipp.sub$seroconverted, dipp.sub$Breast_feeding_any))
+
+#different between sites? --> NO
+fisher.test(table(dipp.sub$site, dipp.sub$Breast_feeding_any))
+
+#different between cases and controls within site? --> NO
+##Oulu
+fisher.test(table(dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted, dipp.sub[dipp.sub$site == 'Oulu',]$Breast_feeding_any))
+##Tampere
+fisher.test(table(dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted, dipp.sub[dipp.sub$site == 'Tampere',]$Breast_feeding_any))
+##Turku
+fisher.test(table(dipp.sub[dipp.sub$site == 'Turku',]$seroconverted, dipp.sub[dipp.sub$site == 'Turku',]$Breast_feeding_any))
+
+##############################################
+#Duration of exclusive breast feeding
+#Difference between all cases and controls? --> NOT QUITE
+kruskal.test(Duration_exclusive_breast_feeding_weeks~seroconverted, data=dipp.sub.BF)
+#Difference between sites? --> NO
+kruskal.test(Duration_exclusive_breast_feeding_weeks~site, data=dipp.sub.BF)
+
+#Difference between cases and controls within each site? --> NO
+##Oulu
+kruskal.test(Duration_exclusive_breast_feeding_weeks~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Oulu',])
+##Tampere
+kruskal.test(Duration_exclusive_breast_feeding_weeks~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Tampere',])
+##Turku
+kruskal.test(Duration_exclusive_breast_feeding_weeks~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Turku',])
+
+##############################################
+#Duration of any breast feeding
+#Difference between all cases and controls? --> NOT QUITE
+kruskal.test(Duration_Breast_Feeding_months~seroconverted, data=dipp.sub.BF)
+#Difference between sites? --> NO
+kruskal.test(Duration_Breast_Feeding_months~site, data=dipp.sub.BF)
+
+#Difference between cases and controls within each site? --> YES IN TAMPERE!!!
+##Oulu
+kruskal.test(Duration_Breast_Feeding_months~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Oulu',])
+##Tampere
+kruskal.test(Duration_Breast_Feeding_months~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Tampere',])
+##Turku
+kruskal.test(Duration_Breast_Feeding_months~seroconverted, data=dipp.sub.BF[dipp.sub.BF$site == 'Turku',])
+```
+
+
+>**Antibiotics in the first 2 years of life**
+
+
+```{r Abx_table, echo=FALSE}
+#Prevalence of antibiotic use within the first 2 years of life
+Abx.oulu = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Oulu',]$antibiotics, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Oulu',]$antibiotics, dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted))
+Abx.tampere = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Tampere',]$antibiotics, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Tampere',]$antibiotics, dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted))
+Abx.turku = interleave(100*prop.table(table(dipp.sub[dipp.sub$site == 'Turku',]$antibiotics, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted), 2),
+          table(dipp.sub[dipp.sub$site == 'Turku',]$antibiotics, dipp.sub[dipp.sub$site == 'Turku',]$seroconverted))
+Abx.table = data.frame(cbind(Abx.oulu[3:4,], Abx.tampere[3:4,], Abx.turku[3:4,]), row.names=c('Prevalence of antibiotic use (%)', '(N)'))
+
+###
+#exclude subjects that did NOT receive antibiotics
+dipp.sub.Abx = dipp.sub[dipp.sub$antibiotics == 1,]
+
+#Number of antibiotic courses
+Abx.courses = ddply(dipp.sub.Abx, ~site+seroconverted, function(x) c(median=round(median(x$antibiotic_courses, na.rm=TRUE)), 
+                                                      IQR1 = round(quantile(x$antibiotic_courses, na.rm=TRUE)[2]),
+                                                      IQR3 = round(quantile(x$antibiotic_courses, na.rm=TRUE)[4])))
+Abx.courses$IQR = paste('(', Abx.courses$`IQR1.25%`, ':', Abx.courses$`IQR3.75%`, ')', sep='')
+
+#merge
+Abx.complete = data.frame(rbind(round(Abx.table, 2), 
+                                      "Median number of courses"=Abx.courses[,3],
+                                      "IQR of number of courses"=Abx.courses[,6]))
+names(Abx.complete) = c('Oulu Controls', 'Oulu Cases', 'Tampere Controls', 'Tampere Cases', 'Turku Controls', 'Turku Cases')
+
+kable(Abx.complete)
+```
+
+```{r Abx_plot, fig.height=4, echo=FALSE, fig.width=15}
+#prevalence plot
+Abx.plot = melt(Abx.table[1,])
+Abx.plot$seroconverted = rep(c('FALSE', 'TRUE'), 3, each=1)
+Abx.plot$site = rep(c('Oulu', 'Tampere', 'Turku'), 1, each=2)
+
+
+Abx.p1 = ggplot(Abx.plot, aes(seroconverted, value, fill=seroconverted)) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~site) +
+  scale_fill_manual(values = c("#233B43", "#E84646", "#65ADC2")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects') +
+  ggtitle('Prevalence of antibiotic use differs between site')
+#########################################################
+#Antibiotic courses
+Abx.p2 = ggplot(dipp.sub.Abx, aes(seroconverted, antibiotic_courses, color=seroconverted)) + 
+  geom_boxplot(size=1, fill='white') +
+  facet_wrap(~site) +
+  theme_bw() +
+  ylab('Number of antibiotic courses \nwithin the first 2 years of life') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2")) +
+  ggtitle('Number of antibiotic courses')
+
+grid.arrange(Abx.p1, Abx.p2, nrow=1)
+```
+
+```{r Abx_test}
+#Abx prevalence
+#different between all cases and controls? --> NO
+fisher.test(table(dipp.sub$seroconverted, dipp.sub$antibiotics))
+
+#different between sites? --> YES
+fisher.test(table(dipp.sub$site, dipp.sub$antibiotics))
+
+#different between cases and controls within site? --> NO
+##Oulu
+fisher.test(table(dipp.sub[dipp.sub$site == 'Oulu',]$seroconverted, dipp.sub[dipp.sub$site == 'Oulu',]$antibiotics))
+##Tampere
+fisher.test(table(dipp.sub[dipp.sub$site == 'Tampere',]$seroconverted, dipp.sub[dipp.sub$site == 'Tampere',]$antibiotics))
+##Turku
+fisher.test(table(dipp.sub[dipp.sub$site == 'Turku',]$seroconverted, dipp.sub[dipp.sub$site == 'Turku',]$antibiotics))
+
+#####################################
+#Number of courses
+#Difference between all cases and controls? --> NO
+kruskal.test(antibiotic_courses~seroconverted, data=dipp.sub.Abx)
+#Difference between sites? --> NO
+kruskal.test(antibiotic_courses~site, data=dipp.sub.Abx)
+
+#Difference between cases and controls within each site? --> NO
+##Oulu
+kruskal.test(antibiotic_courses~seroconverted, data=dipp.sub.Abx[dipp.sub.Abx$site == 'Oulu',])
+##Tampere
+kruskal.test(antibiotic_courses~seroconverted, data=dipp.sub.Abx[dipp.sub.Abx$site == 'Tampere',])
+##Turku
+kruskal.test(antibiotic_courses~seroconverted, data=dipp.sub.Abx[dipp.sub.Abx$site == 'Turku',])
+```
+
+##Natural History
+
+###Islet Autoantibodies
+
+>**Appearance of first autoantibody**
+
+```{r firstSC_table, echo=FALSE}
+#extract cases
+dipp.sub.cases = dipp.sub[dipp.sub$seroconverted == TRUE,]
+
+#Number of antibiotic courses
+firstAb = ddply(dipp.sub.cases, ~site+seroconverted, function(x) c(median=round(median(x$age_first_sc, na.rm=TRUE)/30.5), 
+                                                      IQR1 = round((quantile(x$age_first_sc, na.rm=TRUE)[2])/30.5),
+                                                      IQR3 = round((quantile(x$age_first_sc, na.rm=TRUE)[4])/30.5)))
+firstAb$IQR = paste('(', firstAb$`IQR1.25%`, ':', firstAb$`IQR3.75%`, ')', sep='')
+
+firstAb.table = data.frame(rbind('Median age of first autoantibody (months)' = firstAb[,3],
+                                 'IQR of age of first autoantibody (months)' = firstAb[,6]))
+names(firstAb.table) = c('Oulu Cases','Tampere Cases','Turku Cases')
+
+kable(firstAb.table)
+
+```
+
+```{r firstSC_plot, fig.height=3, fig.width=5, echo=FALSE}
+ggplot(dipp.sub.cases, aes(site, age_first_sc/30.5, color=site)) + 
+  geom_boxplot(size=1, fill='white') +
+  theme_bw() +
+  ylab('Age of appearance of \n first autoantibody (months)') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2")) 
+```
+
+```{r firstSC_test}
+#Difference between sites? --> YES!
+kruskal.test(age_first_sc~site, data=dipp.sub.cases)
+
+```
+
+>**Prevalence and median age of specific autoantibodies**
+
+```{r AAb_table, echo=FALSE}
+#Prevalence of antibiotic use within the first 2 years of life
+IAA = interleave(100*prop.table(table(dipp.sub.cases$aa_IAA, dipp.sub.cases$site), 2),
+          table(dipp.sub.cases$aa_IAA, dipp.sub.cases$site))
+IAA.age = ddply(dipp.sub.cases[dipp.sub.cases$aa_IAA == 1,], ~site+seroconverted, 
+                 function(x) c(median=round(median(x$age_IAA, na.rm=TRUE)/30.5), 
+                               IQR1 = round((quantile(x$age_IAA, na.rm=TRUE)[2])/30.5),
+                               IQR3 = round((quantile(x$age_IAA, na.rm=TRUE)[4])/30.5)))
+
+GADA = interleave(100*prop.table(table(dipp.sub.cases$aa_GADA, dipp.sub.cases$site), 2),
+          table(dipp.sub.cases$aa_GADA, dipp.sub.cases$site))
+GADA.age = ddply(dipp.sub.cases[dipp.sub.cases$aa_GADA == 1,], ~site+seroconverted, 
+                 function(x) c(median=round(median(x$age_GADA, na.rm=TRUE)/30.5), 
+                               IQR1 = round((quantile(x$age_GADA, na.rm=TRUE)[2])/30.5),
+                               IQR3 = round((quantile(x$age_GADA, na.rm=TRUE)[4])/30.5)))
+
+IA2A = interleave(100*prop.table(table(dipp.sub.cases$aa_IA2A, dipp.sub.cases$site), 2),
+          table(dipp.sub.cases$aa_IA2A, dipp.sub.cases$site))
+IA2A.age = ddply(dipp.sub.cases[dipp.sub.cases$aa_IA2A == 1,], ~site+seroconverted, 
+                 function(x) c(median=round(median(x$age_IA2A, na.rm=TRUE)/30.5), 
+                               IQR1 = round((quantile(x$age_IA2A, na.rm=TRUE)[2])/30.5),
+                               IQR3 = round((quantile(x$age_IA2A, na.rm=TRUE)[4])/30.5)))
+
+AAb.age = data.frame(rbind(IAA.age, GADA.age, IA2A.age))
+AAb.age$IQR = paste('(', AAb.age$IQR1.25., ':', AAb.age$IQR3.75., ')', sep='')
+AAb.age$IA = rep(c('IAA', 'GADA', 'IA2A'), each=3)
+
+AAb.complete = rbind(data.frame(round(IAA[c(3,4),]), row.names=c('Prevalence IAA (%)', '(N of IAA)')), 
+                     "Median IAA age"=AAb.age[1:3,3],
+                     "IQR IAA age"=AAb.age[1:3,6],
+                     data.frame(round(GADA[c(3,4),]), row.names=c('Prevalence GADA (%)', '(N of GADA)')), 
+                     "Median GADA age"=AAb.age[4:6,3],
+                     "IQR GADA age"=AAb.age[4:6,6],
+                     data.frame(round(IA2A[c(3,4),]), row.names=c('Prevalence IA2A (%)', '(N of IA2A)')), 
+                     "Median IA2A age"=AAb.age[7:9,3],
+                     "IQR IA2A age"=AAb.age[7:9,6])
+
+kable(AAb.complete)
+```
+
+```{r AAb_plot, echo=FALSE, fig.height=4, fig.width=16}
+#Prevalence plot
+AAb = data.frame(rbind(melt(IAA[c(1,3),]),
+                       melt(GADA[c(1,3),]),
+                       melt(IA2A[c(1,3),])))
+AAb$AAb = factor(rep(c('IAA', 'GADA', 'IA2A'), each=6), levels=c('IAA', 'GADA', 'IA2A'))
+names(AAb) = c('AAb positive', 'site', 'value', 'AAb')
+
+AAb.p1 = ggplot(AAb, aes(site, value, fill=factor(`AAb positive`))) + 
+  geom_bar(stat='identity') + 
+  facet_wrap(~AAb) +
+  scale_fill_manual(values = c("#233B43", "#E84646", "#65ADC2")) + 
+  theme_bw() + 
+  ylab('Percentage of subjects') +
+  ggtitle('Prevalence of Autoantibodies between sites')
+
+AAb.age.plot = melt(dipp.sub.cases, measure.vars = c('age_IAA', 'age_GADA', 'age_IA2A'))
+
+AAb.p2 = ggplot(AAb.age.plot, aes(site, value/30.5, color=site)) + 
+  facet_wrap(~variable) +
+  geom_boxplot(size=1, fill='white') +
+  theme_bw() +
+  ylab('Age of autoantibody appearance(months)') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2")) +
+  ggtitle('Age of Autoantibody appearance')
+
+grid.arrange(AAb.p1, AAb.p2, nrow=1)
+```
+
+```{r AAb_test}
+#Difference between sites?
+##IAA prevalence --> NO
+fisher.test(table(dipp.sub.cases$site, dipp.sub.cases$aa_IAA))
+##GADA prevalence --> NO
+fisher.test(table(dipp.sub.cases$site, dipp.sub.cases$aa_GADA))
+##IA2A prevalence --> YES
+fisher.test(table(dipp.sub.cases$site, dipp.sub.cases$aa_IA2A))
+
+#Difference between age of T1D AAb appearance 
+##IAA --> NOT QUITE
+kruskal.test(age_IAA~site, dipp.sub.cases[dipp.sub.cases$aa_IAA == 1,])
+##IAA --> NOT QUITE
+kruskal.test(age_GADA~site, dipp.sub.cases[dipp.sub.cases$aa_GADA == 1,])
+##IA2A --> NOT QUITE
+kruskal.test(age_IAA~site, dipp.sub.cases[dipp.sub.cases$aa_IA2A == 1,])
+```
+
+
+###Type 1 Diabetes
+
+
+```{r T1D_table, echo=FALSE}
+dipp.sub.t1d = dipp.sub[dipp.sub$has_T1D == 1,]
+
+T1D = interleave(100*prop.table(table(dipp.sub.cases$has_T1D, dipp.sub.cases$site), 2),
+          table(dipp.sub.cases$has_T1D, dipp.sub.cases$site))
+T1D.age = ddply(dipp.sub.t1d, ~site+seroconverted, 
+                 function(x) c(median=round(median(x$age_T1D, na.rm=TRUE)/30.5), 
+                               IQR1 = round((quantile(x$age_T1D, na.rm=TRUE)[2])/30.5),
+                               IQR3 = round((quantile(x$age_T1D, na.rm=TRUE)[4])/30.5)))
+T1D.age$IQR = paste('(', T1D.age$`IQR1.25%`, ':', T1D.age$`IQR3.75%`, ')', sep='')
+
+#merge
+T1D.complete = rbind(data.frame(round(T1D[c(3,4),]), row.names=c('Prevalence T1D (%)', '(N of T1D)')), 
+                     "Median T1D age"=T1D.age[1:3,3],
+                     "IQR T1D age"=T1D.age[1:3,6])
+
+kable(T1D.complete)
+
+```
+
+```{r T1D_plot, fig.height=3, echo=FALSE, fig.width=10}
+#T1D prevalence
+T1D.plot = melt(T1D[c(1, 3),])
+names(T1D.plot) = c('has_T1D', 'site', 'value')
+
+t1d.p1 = ggplot(T1D.plot, aes(site, value, fill=factor(has_T1D))) + 
+  geom_bar(stat='identity') +
+  scale_fill_manual(values = c("#233B43", "#E84646", "#65ADC2")) + 
+  theme_bw() + 
+  ylab('Percentage of case subjects') +
+  ggtitle('Prevalence of T1D does not differ between site')
+
+#Age of T1D onset
+t1d.p2 = ggplot(dipp.sub.t1d, aes(site, age_T1D/30.5, color=site)) + 
+  geom_boxplot(size=1, fill='white') +
+  theme_bw() +
+  ylab('Age of T1D onset (months)') + 
+  scale_color_manual(values = c("#233B43", "#E84646", "#65ADC2")) 
+
+grid.arrange(t1d.p1, t1d.p2, nrow=1)
+```
+
+```{r T1D_test}
+#Prevalence
+#Difference between sites? --> NO
+fisher.test(table(dipp.sub.cases$site, dipp.sub.cases$has_T1D))
+
+#Difference between age of T1D onset --> NOT QUITE
+kruskal.test(age_T1D~site, dipp.sub.t1d)
+```
+
+
+##Summary of Confounders
+
+Overall, the main demographic differences were in antibiotic use. Meanwhile, there were differences in autoimmune progression between the 3 cities:
+
+- Antibiotic use within the first 2 years of life weas more prevalent in Turku than in Tampere. However, of the subjects that did receive anitbiotics, there was no differences in the number of coursess received.
+- There were no differences in gender, mode of delivery, or prevalence of breast-feeding between cities or between cases and controls within cities.
+- In Tampere, cases received breast milk for a longer period of time compared to controls (median of 12 vs. 7 months, respectively).
+- There was no difference in HLA-DQB1 between cities or between cases and controls within each city.
+- The prevalence on IAA and GADA were similar across cities, but...
+- IA-2A was more prevalent in Tampere compared to Oulu and Turku.
+- The total number of autoantibodies a case developed were similar between the 3 cities.
+- There was no difference in which autoantibody appeared first acorss the 3 cities, however...
+- the first autoantibody appeared earlier in Oulu compared to Tampere and Turku.
+- There were no differences in the prevalence or age of onset of type 1 diabetes.
+
+---
+
+
+#General Bacterial Profiles 
+
+A basic view of the bacterial profiles within each site,  across age was considered. To prevent any subject with larger sampling from overly influencing the profile of the sample population, samples from the same subject within an age bin (width = 2 months, sampled every month) were averaged prior to taking the population average This calculation was performed within each site separately. Profiles were only considered at the phylum level, though this code can be used to perform calculations at any level.
+
+Based on previous studies, it is expected that microbial composition will be transitioning within the first year of life and this will likely be characterized by an increase in Firmicutes and Bacteroidetes, while Proteobacteria and Actinobacteria will be in decline. These phyla are typically the dominant phyla found in human feces.
+
+####Figure 2A
+
+```{r profiles, fig.width=15, fig.height=5}
+#melt data
+dipp.p.m = psmelt(dipp.p)
+
+#generate age bins - bins all samples within a 2 month window every month
+dipp.p.agebins = generate_subsets(dipp.p.m, 'age_at_sampling', seq(91.5,732, by=30.5), 60, 'Phylum', 'Abundance')
+
+#get summary stats within each age bin
+##consider cases and controls separately so even weight will be given to each group
+dipp.p.median.sc = ddply(dipp.p.agebins, ~site+seroconverted+window+Phylum, 
+                      function(x) c(med_age = median(x$age_at_sampling),
+                                    med_Abundance = median(x$value),
+                                    avg_Abundance = mean(x$value),
+                                    sd_Abundance = sd(x$value),
+                                    var_Abundance = var(x$value)))
+
+#reorder phyla by abundance
+##calculate sum of avg_Abundance for each phyla
+phyla = ddply(dipp.p.median.sc, ~Phylum, function(x) sum(x$avg_Abundance))
+##order by decreasing Phylum (class=data.frame)
+phyla.ord = phyla[order(phyla$V1, decreasing=TRUE),]
+dipp.p.median.sc$Phylum = factor(dipp.p.median.sc$Phylum, levels=c(as.character(phyla.ord$Phylum)))
+
+#get median of case and control medians
+dipp.p.median = ddply(dipp.p.median.sc, ~site+window+Phylum, 
+                      function(x) c(med_age = median(x$med_age),
+                                    med_Abundance = median(x$med_Abundance),
+                                    avg_Abundance = median(x$avg_Abundance),
+                                    sd_Abundance = median(x$sd_Abundance),
+                                    var_Abundance = median(x$var_Abundance)))
+
+#get phyla that average greater than 1%
+phyla.1per = phyla.ord[phyla.ord$V1 >= 1,]$Phylum
+
+dipp.p.median.1per = subset(dipp.p.median, Phylum %in% phyla.1per)
+dipp.p.median.1per$Phylum = factor(dipp.p.median.1per$Phylum)
+dipp.p.median.1per$Phylum = factor(dipp.p.median.1per$Phylum, levels=rev(levels(dipp.p.median.1per$Phylum)))
+
+fresh_swap = rev(c('#65ADC2', '#233B43', '#E84646', '#C29365', '#362C21'))
+
+
+ggplot(dipp.p.median.1per, aes(window, avg_Abundance, fill=Phylum)) + 
+  geom_area(stat='identity', position='stack') +
+  facet_wrap(~site) +
+  theme_classic() + 
+  xlab('Age (months)') +
+  ylab('Mean relative abundnace (proportion)') +
+  scale_x_continuous(breaks=unique(dipp.p.median.1per$window)[c(seq(1,22,3))], 
+                     labels=seq(3,24,3), 
+                     expand=c(0,0.25)) +
+  scale_y_continuous(breaks=seq(0,1,0.2), labels=seq(0,1, 0.2), expand=c(0,0)) +
+  coord_cartesian(ylim = c(0,1)) +
+  theme(panel.grid=element_blank(), 
+        panel.border=element_blank()
+        #legend.position='none'
+        ) +
+  ggtitle('Phylum-Level Taxonomy') +
+  scale_fill_manual(values=fresh_swap, name='Phyla') +
+  scale_color_manual(values=fresh_swap)
+```
+
+**Figure 2A. *Phyla profile by site*** On average, samples across all sites are dominated by Firmicutes and Bacteroidetes by 1 year of life, as the relative abundances of these phyla increased with age. Also, the relative abundances of Proteobacteria and Actinobacteria decreased with age.
+
+>**Tri-monthly summary statistics by site**
+
+**4 major phyla**
+
+Analyses were focued on taxa assigned to the 4 most dominant phyla: Firmicutes, Bacteroidetes, Actinobacteria, and Proteobacteria. On average, these phyla accounted for the following cumulative relative abundance across all samples:
+
+```{r, echo=FALSE}
+x = ddply(dipp.p.median, ~site+Phylum, function(x) mean(x$avg_Abundance))
+maj.phy = c('Firmicutes', 'Bacteroidetes', 'Actinobacteria', 'Proteobacteria')
+x.maj = subset(x, Phylum %in% maj.phy)
+maj.phy.sum = ddply(x.maj, ~site, function(x) sum(x$V1))
+maj.phy.sum$V1 = 100*round(maj.phy.sum$V1, 4)
+names(maj.phy.sum) = c('Site', 'Cumulative relative abundance of 4 dominant phyla (%)')
+
+kable(maj.phy.sum)
+```
+
+**Summary statistics for 4 major phyla by site**
+
+```{r, echo=FALSE}
+y = ddply(dipp.p.median, ~Phylum+site, function(x) summary(x$avg_Abundance))
+y.maj = subset(y, Phylum %in% maj.phy)
+y.maj2 = y.maj[,c(1,2,5)]
+y.maj2$Median = 100*round(y.maj2$Median, 4)
+y.maj.cast = dcast(y.maj2, site~Phylum, value.var = 'Median')
+kable(y.maj.cast)
+```
+
+**Summary statistics for 4 major phyla at 3-5 and 12 months across all sites**
+
+```{r, echo=FALSE}
+z = dipp.p.median
+z$window.month = round(z$window/30.5, 1)
+
+z.3a = subset(z, window.month %in% c(3, 4, 5))
+z.3 = ddply(z.3a, ~Phylum+site, function(x) mean(x$avg_Abundance))
+z.3$timepoint = '3-5 months'
+z.12a = subset(z, window.month %in% c(10, 11, 12))
+z.12 = ddply(z.12a, ~Phylum+site, function(x) median(x$avg_Abundance))
+z.12$timepoint = '12 months'
+z.merge = rbind(z.3, z.12)
+z.maj = subset(z.merge, Phylum %in% maj.phy)
+z.maj$timepoint = factor(z.maj$timepoint, levels=c('3-5 months', '12 months'))
+z.maj.cast = dcast(z.maj, Phylum+site~timepoint, value.var='V1')
+kable(z.maj.cast)
+```
+
+
+>**Phyla associations with age**
+
+It is well documented that taxonomic profiles transition during the first year of life. In this section, the relationship of age and the 4 major phyla are formally tested using generalized linear models. 
+
+The relative abundances of Bacteroidetes and Firmicutes increased with age (latter not quite significant, p=0.15), while the relative abundances of Proteobacteria and Actinobacteria decreased. This is also indicated in Figure 2A and the summary statistics for the 3-5 and 12 month time points presented above.
+
+```{r age_phyla_glm}
+#prep long-formatted table
+dipp.p.m = psmelt(dipp.p)
+#select abundant phyla
+dipp.p.m4 = subset(dipp.p.m, Phylum %in% maj.phy)
+#add less variable age  
+dipp.p.m4$mo_at_sampling = round(dipp.p.m4$age_at_sampling/30.5, 0)
+#run GEE: abundance ~ Age^2 + site + gender, strata = subject
+gee.age.result = ddply(dipp.p.m4, ~Phylum, function(x) test_age_gee(x, 'Abundance'))
+gee.age.result2 = gee.age.result[gee.age.result$effect != '(Intercept)',]
+row.names(gee.age.result2) = NULL
+kable(gee.age.result2)
+```
+
+---
+
+#Diversity Analysis
+
+In initial exploratory analyses, sample diversity was considered. In this section, 3 aspects of diversity were assessed:
+
+- sequencing depth using rarefaction curves
+- alpha diversity (species richness and evenness)
+- beta diversity 
+
+##Rarefaction Curve
+
+Rarefaction curves were examined in order to determine whether sufficient coverage for each sample was obtained in order to obtain adequate representation of taxa. That is, taxa that dominate in a sample are more likely to be sequenced than rare taxa. Therefore, the lower sequence coverage of a sample you have, the more likely you are to miss low abundant or rare taxa. Ideally, with increased coverage, the number of unique OTUs or species identified will reach an asymptote, and one could say they have sufficient coverage to detect the majority of unique taxa expected to be present in a sample. With stool microbiome studies, it has been suggested that the minimum amount of coverage should be ~10,000 reads per sample. Of course, this number is debateable, and it is best to assess the validity of this within a given experiment. Below, 50 samples are randomly selected and a rarefaction curve generated.
+
+```{r rar_curve_calc, results='hide', fig.keep='none'}
+#randomly select 50 sample ids (excluding technical replicates)
+#not worried about documenting rng.seed here
+x = sample(sample_data(dipp.nTR)$sample_id, 50)
+
+#extract these samples
+dipp.rarcurv = prune_samples(sample_data(dipp.nTR)$sample_id %in% x, dipp.nTR)
+
+tax.levels = c("OTU", "Genus", "Species")
+
+dipp.rarcurv.df = data.frame()
+
+for (tax in tax.levels) {
+  if (tax == 'OTU') {
+    phy = dipp.rarcurv
+  } else {
+    phy = tax_glom(dipp.rarcurv, tax)
+  }
+  
+  #function defined in D3C_functions_5.0.R
+  ##extracts rarefaction values from rarecurve()
+  rar = get_rarefaction(data.frame(otu_table(phy)), 20000)
+  #add group variable indicating tax.level
+  rar$group = factor(c(tax))
+  #combine rarefied output from each tax.levels
+  dipp.rarcurv.df = rbind(dipp.rarcurv.df, rar)
+}
+```
+
+```{r rar_curve_plot, fig.width=15}
+dipp.rarcurv.df$group = factor(dipp.rarcurv.df$group, levels=c('Genus', 'Species', 'OTU'))
+ggplot(dipp.rarcurv.df, aes(SampleSize, Species, group=ID)) +
+  geom_line() + 
+  facet_wrap(~group, scales='free') +
+  theme_bw()
+```
+
+**CONCLUSIONS:** Sequencing depth appears sufficient for genus discovery. However, at the species and OTU levels, a saturation point was not clearly achieved. 
+
+##Alpha Diversity
+
+Alpha diversity metrics were calculated using raw read counts for the OTUs. This does introduce the bias of higher alpha diversity for samples that had a greater sequencing depth. Therefore, alpha diversity was also calculated on rarefied counts. By basing the alpha diversity measure on a subselection of reads, samples with high read counts will have an under-estimated alpha diversity whereas the alpha metric would not be expected to deviate much in samples with lower total read counts. 
+
+Regardless of the the format of input count values, alpha diversity increases with age and is generally not different between cases and controls. Although, there is some evidence of increased alpha diversity in controls in Tampere. However, this only occurred at select time points and was not observed in the other 2 cities. 
+
+Alpha metrics were calculated for each site separately using ```estimate_richness``` functions from the *phyloseq*```* package, and plots were generated uing ```ggplot2```. Again samples that served as technical replicates were removed. The following alpha metrics were considered: 
+
+- **Chao1:** a measure of species richness and estimates the number of species present in a community. With the understanding that rare species are less likely to be detected, Chao1 is typically greater than the observed richness within a sample.
+- **Shannon:** a measure of species eveness, combining richness and abundance into a single value. The actual value, is somewhat arbitrary but is relative to other samples. Samples that are dominated by one or a few taxa will have a lower Shannon Diversity Index (eveness) compared to those where abundance is distributed more equally among many taxa. However, eveness is not indicative of composition. For example, you may have 2 samples with a similar eveness dominated by 2 species, based on beta diversity metric alone, you would not be able to distinguish these samples, but one sample could be dominated by completely different species than the other.
+- **Simpson's Index of Diversity (1-D):** a measure that accounts for the number of species present as well as the abundances of species. The value ranges from 0 to 1 and represents the probability that two reads randomly selected from a given samples will belong to different species. Thus, the greater the value, the greater the diversity.
+
+```{r alpha_diversity}
+#define arguments
+alphas = c('Chao1', 'Shannon', 'Simpson')
+sites = c('Oulu', 'Tampere', 'Turku')
+
+#calculate alpha metrics
+dipp.alpha = data.frame()
+for (site in sites) {
+  #subset by site
+  phy = subset_samples(dipp.nTR, site==site)
+  #calculate alpha metrics
+  phy.alpha = estimate_richness(phy, measures = alphas)
+  #add sample_data
+  phy.div = data.frame(phy.alpha, sample_data(phy))
+  #combine results
+  dipp.alpha = rbind(dipp.alpha, phy.div)
+}
+
+#get long-format of data.frame for plotting
+dipp.alpha.m = melt(dipp.alpha, measure.vars = c('Chao1', 'Shannon', 'Simpson'))
+```
+
+###Differences in alpha diversity between seroconversion status and confounders
+
+Normality appears acceptable for Chao1 and Shannon measures, so no transformation will be applied to these values prior to performing statistical test. 
+
+Two different statistical methods were applied to identify differences in alpha diversity: a time independent approach simply using the Mann-Whitney test for differences of means in non-parametric data, and a regression approach fitting a generalized linear model. In the former, samples were binned monthly and the median of samples from the same subject within the same age bin were obtained in order to account for repeated measures.
+
+```{r alpha_diversity_stats, fig.width = 15, fig.height=10}
+#DISTRIBUTION
+ggplot(dipp.alpha.m, aes(value)) + 
+  geom_histogram() + 
+  facet_wrap(~variable+site, scales='free') +
+  theme_bw() + 
+  xlab('Alpha diversity value') +
+  ylab('Number of samples') +
+  ggtitle('Distributions of Alpha Diversity Metrics')
+
+#TIME-SPECIFIC ANLAYSIS (MANN-WHITNEY)
+##generate_subsets() defined in D3C_functions_5.0.R
+  ##returns a data.frame where samples have been assigned to monthy age bins 
+  ##and repeated measures within an age bin accounted for
+dipp.alpha.agebins = generate_subsets(dipp.alpha.m, 'age_at_sampling', seq(91.5,732, by=30.5), 60, 'variable', 'value')
+##perform Mann-Whitney test within each age bin; function defined in D3C_functions_5.0.R
+dipp.alpha.mw = test_mw(dipp.alpha.agebins, 'value', 'window', 'variable', 'seroconverted', 'site')
+
+#add MW results to data.frame
+dipp.alpha.m2 = merge(dipp.alpha.agebins, dipp.alpha.mw, by=intersect(names(dipp.alpha.mw), names(dipp.alpha.agebins)), all.x = TRUE)
+
+#GLM
+dipp.alpha.m$mask_id = factor(dipp.alpha.m$mask_id)
+alpha.glm = list()
+for (site in sites) {
+  for (var in alphas) {
+    #subset by site
+    alpha.df = dipp.alpha.m[dipp.alpha.m$site == site,]
+    #subset by alpha metric
+    alpha.df.var = alpha.df[alpha.df$variable == var,]
+    #scale variables
+    alpha.df.var$scaled.value = scale(alpha.df.var$value)
+    alpha.df.var$scaled.age = scale(alpha.df.var$age_at_sampling)
+    x = glm(value~I(age_at_sampling^2)*seroconverted, data = alpha.df.var)
+  alpha.glm[[paste(site, var, sep='_')]] = x
+    }
+}
+
+#extract GLM summary results
+glm.table = list()
+#glm.table = data.frame()
+for (i in names(alpha.glm)) {
+  x = summary(alpha.glm[[i]])$coefficients[,4]
+  #xx = x$coefficients
+  #cbind(glm.table, data.frame(x))
+  glm.table[[i]] = x
+  #glm.table[,i] = data.frame(x)
+}
+
+```
+
+**GLM table of p-values**
+
+```{r glm_result_table, echo=FALSE}
+kable(data.frame(glm.table))
+```
+
+```{r alpha_diversity_plot, fig.width=15, fig.height=10}
+#plots
+ggplot(dipp.alpha.m2, aes(age_at_sampling, value, color=seroconverted)) +
+  geom_smooth(alpha=0.25, method='loess') +
+  facet_wrap(~variable+site, scales='free') + 
+  scale_x_continuous(breaks=seq(0,747,91.5), labels=seq(0,24,3)) +
+  ylab('Alpha Metric') +
+  theme_bw() +
+  geom_vline(aes(xintercept=SeroSiteMed)) +
+  geom_vline(aes(xintercept=SeroSite1stIQR), lty='dashed') +
+  geom_vline(aes(xintercept=SeroSite3rdIQR), lty='dashed') +
+  ggtitle('Alpha Diversity Measures on Raw Counts') +
+  scale_color_manual(values = c("brown", "green", "blue", "#233B43", "grey", "#65ADC2")) +
+  #geom_rug(aes(color=significance), sides ='b', size=1)
+  geom_rug(aes(x=window, color=significance), sides ='b', size=2)
+```
+
+**CONCLUSIONS:**
+
+- Age had the most effect on alpha diversity indicated by both statistical methods applied and regardless of site or alpha diversity measure investigated (GLM, p-value < 0.05 for all metrics). 
+- Time-specific anaylsis (Mann-Whitney test with FDR correction) indicated that there is little to no difference between alpha diversity and case-control status regardless of the metric considered, except for possibly in Tampere. 
+- There may be a small difference in alpha diversity between cases and controls in Tampere. However, this may be confounded by a difference in breast feeding as described in the *Comparison of Potential Confounders between Cities* section above.
+
+###Effect of rarefying
+
+There is debate about the 'best' way to normalize read counts. As previously mentioned, alpha diversity metrics are subject to total read count biases. Therefore, to consider an alternative, read counts were rarefied to 20,000 reads per sample and then alpha diversity metrics were calculated. Again, technical replicate samples were omitted in order to remain consistent with the non-rarefied alpha diversity analysis presented above, although their inclusion should not affect the results.
+
+```{r alpha_diversity_rarefied, fig.width=15, fig.height=10}
+#rarefy counts
+dipp.nTR.rar20K = rarefy_even_depth(dipp.nTR, rngseed = TRUE, replace = FALSE, sample.size = 20000)
+
+#calculate alpha metrics
+dipp.alpha.rar = data.frame()
+for (site in sites) {
+  #subset by site
+  phy = subset_samples(dipp.nTR.rar20K, site==site)
+  #calculate alpha metrics
+  phy.alpha = estimate_richness(phy, measures = alphas)
+  #add sample_data
+  phy.div = data.frame(phy.alpha, sample_data(phy))
+  #combine results
+  dipp.alpha.rar = rbind(dipp.alpha, phy.div)
+}
+
+dipp.alpha.rar.m = melt(dipp.alpha.rar, measure.vars = c('Chao1', 'Shannon', 'Simpson'))
+```
+
+```{r alpha_rar_stats, echo=FALSE}
+#TIME-SPECIFIC ANLAYSIS (MANN-WHITNEY)
+##generate_subsets() defined in D3C_functions_5.0.R
+  ##returns a data.frame where samples have been assigned to monthy age bins 
+  ##and repeated measures within an age bin accounted for
+dipp.alpha.rar.agebins = generate_subsets(dipp.alpha.rar.m, 'age_at_sampling', seq(91.5,732, by=30.5), 60, 'variable', 'value')
+##perform Mann-Whitney test within each age bin; function defined in D3C_functions_5.0.R
+dipp.alpha.rar.mw = test_mw(dipp.alpha.rar.agebins, 'value', 'window', 'variable', 'seroconverted', 'site')
+
+#add MW results to data.frame
+dipp.alpha.rar.m2 = merge(dipp.alpha.rar.agebins, dipp.alpha.rar.mw, by=intersect(names(dipp.alpha.rar.mw), names(dipp.alpha.rar.agebins)), all.x = TRUE)
+
+#GLM
+dipp.alpha.rar.m$mask_id = factor(dipp.alpha.rar.m$mask_id)
+alpha.rar.glm = list()
+for (site in sites) {
+  for (var in alphas) {
+    #subset by site
+    alpha.df = dipp.alpha.rar.m[dipp.alpha.rar.m$site == site,]
+    #subset by alpha metric
+    alpha.df.var = alpha.df[alpha.df$variable == var,]
+    #scale variables
+    alpha.df.var$scaled.value = scale(alpha.df.var$value)
+    alpha.df.var$scaled.age = scale(alpha.df.var$age_at_sampling)
+    x = glm(value~I(age_at_sampling^2)*seroconverted, data = alpha.df.var)
+  alpha.rar.glm[[paste(site, var, sep='_')]] = x
+    }
+}
+
+#extract GLM summary results
+glm.rar.table = list()
+#glm.table = data.frame()
+for (i in names(alpha.glm)) {
+  x = summary(alpha.rar.glm[[i]])$coefficients[,4]
+  #xx = x$coefficients
+  #cbind(glm.table, data.frame(x))
+  glm.rar.table[[i]] = x
+  #glm.table[,i] = data.frame(x)
+}
+
+```
+
+```{r alpha_rar_plot, echo=FALSE, fig.width=15, fig.height=10}
+#plots
+ggplot(dipp.alpha.rar.m2, aes(age_at_sampling, value, color=seroconverted)) +
+  geom_smooth(alpha=0.25, method='loess') +
+  facet_wrap(~variable+site, scales='free') + 
+  scale_x_continuous(breaks=seq(0,747,91.5), labels=seq(0,24,3)) +
+  ylab('Alpha Metric') +
+  theme_bw() +
+  geom_vline(aes(xintercept=SeroSiteMed)) +
+  geom_vline(aes(xintercept=SeroSite1stIQR), lty='dashed') +
+  geom_vline(aes(xintercept=SeroSite3rdIQR), lty='dashed') +
+  ggtitle('Alpha Diversity Measures on Rarefied Counts') +
+  scale_color_manual(values = c("brown", "green", "#233B43",  "grey", "#65ADC2")) +
+  geom_rug(aes(x=window, color=significance), sides ='b', size=2)
+```
+
+
+
+**CONCLUSIONS:**
+
+The same conclusions regarding alpha diversity were drawn when reads were rarefied and thus has little effect on on results. The code used in this portion is hidden in the final document for aesthetic reasons but ressembles that performed on non-rarefied data and can be found in the provided Rmarkdown file.
+
+
+##Beta Diversity
+
+Beta diversity compares the composition of different microbial communities. To do this, first a pair-wise distance or dissimilarity matrix for all samples is calculated. Ordination and clustering methods are then used to visually compare community composition for exploratory purposes. Differences in microbial composition can be formally tested using permutational/non-parametric MANOVA implemented with the ```adonis``` function. The following distance/dissimilarity methods were applied:
+
+- **Bray-Curtis:** quantifies the compositional dissimilarity between 2 samples (considers presence/absence & abundance)
+- **Weighted UniFrac:** a quantitative (accounts for abundance) assessment of microbial composition which accounts for phylogenetic relatedness of community members
+- **Unweighted UniFrac:** a qualitative (presence or absence) assessment of microbial composition which accounts for phylogenetic relatedness of community members
+
+The latter two methods require a phylogenetic tree...
+
+```{r beta_calc_prep}
+#load phylogenetic tree needed for unifrac methods
+gg_tree = read_tree_greengenes('AdditionalFile4/inputs/gg_13_8.97_otus.tree')
+dipp.TR.tree = merge_phyloseq(dipp.TR, gg_tree)
+
+#even sampling depth for each sample
+dipp.TR.tree.depth = transform_sample_counts(dipp.TR.tree, function(x) 1e+06 * x/sum(x))
+
+#add tree
+dipp.g.tree = merge_phyloseq(dipp.g, gg_tree)
+#even sampling depth for each sample
+dipp.g.100K = transform_sample_counts(dipp.g.tree, function(x) 1e+06*x)
+
+#split phyloseq object by site
+turku.depth = subset_samples(dipp.g.100K, site == 'Turku') #808 samples
+tampere.depth = subset_samples(dipp.g.100K, site == 'Tampere') #493 samples
+oulu.depth = subset_samples(dipp.g.100K, site == 'Oulu') #193 samples
+
+```
+
+The following code was used to generate the dissimilarity/distance matrices. However, generating these matrices takes quite a bit of time, so the resulting matrices are provided in ```AdditionalFile4/distance_matrices``` for convenience.
+
+```{r beta_calc_WUF, eval=FALSE}
+#apply 3 methods --> used for visualization
+dipp.WUF = ordinate(dipp.g.100K, "PCoA", "unifrac", weighted=TRUE)
+dipp.UUF = ordinate(dipp.g.100K, "PCoA", "unifrac", weighted=FALSE)
+dipp.NB = ordinate(dipp.g.100K, "NMDS", "bray")
+
+#get distance matrices (weighted unifrac only) --> for PERMANOVA and dispersion sections
+WUF.dist.all = phyloseq::distance(dipp.g.100K, method='wunifrac', type='samples')
+WUF.dist.turku = phyloseq::distance(turku.depth, method='wunifrac', type='samples')
+WUF.dist.tampere = phyloseq::distance(tampere.depth, method='wunifrac', type='samples')
+WUF.dist.oulu = phyloseq::distance(oulu.depth, method='wunifrac', type='samples')
+```
+
+
+```{r load_dis, echo=FALSE}
+#Import weighted-unifrac --> visualization
+load('AdditionalFile4/inputs/distance_matrices/dipp_WUF.Rdata')
+
+#Import unweighted-unifrac --> visualization
+load('AdditionalFile4/inputs/dipp_UUF.Rdata')
+
+#Import Bray-Curtis --> visualization
+load('AdditionalFile4/inputs/dipp_NB.Rdata')
+
+#load weighted Unifrac distance matrices (for PERMANOVA):
+load('AdditionalFile4/inputs/WUF.dist.all.Rdata')
+##...by site --> used in dispersion section
+load('AdditionalFile4/inputs/WUF.dist.turku.Rdata')
+load('AdditionalFile4/inputs/WUF.dist.tampere.Rdata')
+load('AdditionalFile4/inputs/WUF.dist.oulu.Rdata')
+```
+
+
+###PERMANOVA Results
+
+In order to test differences in global microbial composition, PERMANOVA (implemented with the ```adonis``` function) was used to test the effects of relevant variables on the microbiota using weighted Unifrac distances. 
+
+```{r meta_prep}
+#extract meta data 
+meta = data.frame(sample_data(dipp.g.100K))
+
+#change variables to a factors
+meta$mask_id = factor(meta$mask_id)
+meta$age_month = factor(meta$age_month)
+meta$Gender = factor(meta$Gender, labels=c('Female', 'Male'))
+meta$MoD_simp = ifelse(meta$MoD_simp > 1, c('Vaginal'), c('C-section'))
+meta$antibiotics = as.logical(meta$antibiotics)
+
+```
+
+> weighted unifrac ~ site, strata = age
+
+Initially, we tested if microbial variation differed by site, while accounting for age (specified as the ```strata``` argument). The latter would correct for differing age distribution of samples between sites. Site had a significant effect (p-value=0.001) on microbial variation, accounting for ~2.1% of microbial variation. Therefore, the site variable was used as strata for subsequent PERMANOVA tests. 
+
+```{r permanova_site}
+adon.site = adonis(WUF.dist.all~site, data = meta, strata=meta$age_month)
+adon.site
+```
+
+> weighted unifrac ~ age*mask_id, strata = site
+
+Previous literature of human microbiome studies indicate that subject and age contribute a large amount to microbiota variation. This was also the observed in the this cohort.
+
+```{r permanova_subject}
+adon.IDage = adonis(WUF.dist.all~mask_id*age_month, data = meta, strata=meta$site)
+adon.IDage
+```
+
+> weighted unifrac ~ site + seroconverted + Gender + breast-feeding + antibiotics, strata = age
+
+Additional variables of interest were tested in order to determine if they contributed to microbiota variation. Variables tested included: seroconversion status, mode of delivery, gender, whether or not a patient was receiving breast milk at the time of sampling, and whether or not a subject received antibiotics within the first 2 years of life. All variables tested had a small but significant effect on microbiota variation.
+
+```{r permanova_vars}
+adon.vars = adonis(WUF.dist.all~site + seroconverted + MoD_simp + Gender + receiving_breast_milk + antibiotics, data = meta, strata=meta$age_month)
+adon.vars
+```
+
+
+**PERMANOVA results summary**
+
+Subject and age had the largest effect on microbial variation. Site also had a significant, although small effect on microbial variation, which justifies stratifying analyses by site. Other variables (mode of delivery, breast-feeding, antibiotic use, gender, and seroconversion status) were also tested for their effects on microbial variation. All, except antibiotic use, had a small although significant effect on microbial variation. This warranted a taxa-independent approach for identifying taxa associated with seroconversion.
+
+```{r extract_adon_results, echo=FALSE}
+adon.summ = data.frame(rbind(data.frame(adon.IDage$aov.tab[1:3, 5:6]),
+                             data.frame(adon.vars$aov.tab[1:6, 5:6])))
+adon.summ$R2 = round(adon.summ$R2, 4)
+names(adon.summ) = c('R2', 'p-value')
+
+kable(adon.summ)
+```
+
+
+###Visualization
+
+```{r colors, echo=FALSE}
+fresh_swap = c('#65ADC2', '#233B43', '#E84646', '#C29365', '#362C21', '#316675', '#168E7F', '#109B37', 'red', 'blue', 'green', 'black')
+```
+
+####Figure 2C
+
+```{r WUF_plot, fig.width=15, fig.height=10, echo=FALSE}
+#WUF PLOTS
+WUF.p = plot_ordination(dipp.g.100K, dipp.WUF,
+                color='age_at_sampling') +
+  geom_point(size=2) +
+  ggtitle('Weighted Unifrac') +
+  scale_color_gradient(high='#3498DB', low='#E84646') + 
+  theme_bw() + 
+  facet_wrap(~site, nrow=1) +
+  annotate('text', label='Firmicutes', x=0.2, y=0.075) +
+  annotate('text', label='Bacteroidetes', x=-0.2, y=0.025) +
+  annotate('text', label='Proteobacteria', x=0.15, y=-0.15) +
+  annotate('text', label='Actinobacteria', x=0.2, y=-0.1) +
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black')) 
+  
+WUF.p.taxa = plot_ordination(dipp.g.100K, dipp.WUF,
+                color='Phylum', 
+                type='taxa') +
+  geom_point(size=2) +
+  ggtitle('Weighted Unifrac') +
+  theme_bw() + 
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black'))  +
+  scale_color_manual(values = fresh_swap)
+
+grid.arrange(WUF.p, WUF.p.taxa)
+```
+
+**Figure 2C** Principle coordinate analysis of weighted-Unifrac distances indicated that subject and age were the dominant sources of variance in global microbial composition.
+
+Note: plots appear in a different orientation from those presented in the manuscript but relationships/distances are the same.
+
+```{r UUF_plot, fig.width=15, fig.height=10, echo=FALSE}
+#UUF PLOTS
+######################
+UUF.p = plot_ordination(dipp.g.100K, dipp.UUF,
+                color='age_at_sampling') +
+  geom_point(size=2) +
+  ggtitle('Unweighted Unifrac') +
+  scale_color_gradient(high='#3498DB', low='#E84646') + 
+  theme_bw() + 
+  facet_wrap(~site, nrow=1) +
+  annotate('text', label='Firmicutes', x=0.0075, y=0.01) +
+  annotate('text', label='Bacteroidetes', x=-0.005, y=-0.05) +
+  annotate('text', label='Proteobacteria', x=0.0075, y=-0.01) +
+  annotate('text', label='Actinobacteria', x=0.005, y=0.005) +
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black')) 
+  
+UUF.p.taxa = plot_ordination(dipp.g.100K, dipp.UUF,
+                color='Phylum', 
+                type='taxa') +
+  geom_point(size=2) +
+  ggtitle('Unweighted Unifrac') +
+  theme_bw() +
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black')) +
+  scale_color_manual(values = fresh_swap)
+grid.arrange(UUF.p, UUF.p.taxa)
+```
+
+```{r NB_plot, fig.width=15, fig.height=10, echo=FALSE}
+#NB PLOTS
+######################
+NB.p = plot_ordination(dipp.g.100K, dipp.NB,
+                color='age_at_sampling') +
+  geom_point(size=2) +
+  ggtitle('Bray-Curtis') +
+  scale_color_gradient(high='#3498DB', low='#E84646') + 
+  theme_bw() + 
+  facet_wrap(~site, nrow=1) +
+  annotate('text', label='Firmicutes', x=-0.05, y=0.13) +
+  annotate('text', label='Bacteroidetes', x=-0.2, y=-0.3) +
+  annotate('text', label='Proteobacteria', x=0.3, y=-0.13) +
+  annotate('text', label='Actinobacteria', x=0.05, y=0.2) +
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black')) 
+  
+NB.p.taxa = plot_ordination(dipp.g.100K, dipp.NB,
+                color='Phylum', 
+                type='taxa') +
+  geom_point(size=2) +
+  ggtitle('Bray-Curtis') +
+  theme_bw() +
+  geom_vline(xintercept=0, color='black') +
+  geom_hline(yintercept=0, color='black') +
+  theme(panel.border=element_rect(color='black')) +
+  scale_color_manual(values = fresh_swap)
+grid.arrange(NB.p, NB.p.taxa)
+```
+
+
+###Dispersion
+
+To determine if samples within more discrete ages  were more distant to samples in other age groups, pair-wise distances were (only considered weighted Unifrac distance here) calculated and the dispersion between age groups was considered. In early age groups, the within age group sample distances are larger than at later age groups. This indicates that the microbiota in early age groups are more sporadic, whereas at later age groups, microbial composition becomes more similar.  
+
+```{r dispersion_WUF, fig.width=15, fig.height=4}
+##make 3 month age categories
+meta$age_month  = as.numeric(meta$age_month)+2
+meta$age_3mo[meta$age_month >= 3 & meta$age_month <= 5] <- '3to6'
+meta$age_3mo[meta$age_month >= 6 & meta$age_month <= 8] <- '6to9'
+meta$age_3mo[meta$age_month >= 9 & meta$age_month <= 11] <- '9to12'
+meta$age_3mo[meta$age_month >= 12 & meta$age_month <= 14] <- '12to15'
+meta$age_3mo[meta$age_month >= 15 & meta$age_month <= 18] <- '15to18'
+meta$age_3mo[meta$age_month > 18] <- 'over18'
+meta$age_3mo = factor(meta$age_3mo, levels = c('3to6', '6to9', '9to12', '12to15', '15to18', 'over18'))
+##subset meta data by site
+turku.meta = meta[meta$site == 'Turku',]
+tampere.meta = meta[meta$site == 'Tampere',]
+oulu.meta = meta[meta$site == 'Oulu',]
+
+#betadisper - dispersion or homogeneity of groups
+disp.turku = with(turku.meta, betadisper(WUF.dist.turku, turku.meta$age_3mo))
+disp.tampere = with(tampere.meta, betadisper(WUF.dist.tampere, tampere.meta$age_3mo))
+disp.oulu = with(oulu.meta, betadisper(WUF.dist.oulu, oulu.meta$age_3mo))
+
+#merge betadisper results to plot
+disp.oulu.df = data.frame(site = rep('Oulu', length(disp.oulu$group)),
+                          group = disp.oulu$group,
+                          distances = disp.oulu$distances)
+disp.tampere.df = data.frame(site = rep('Tampere', length(disp.tampere$group)),
+                          group = disp.tampere$group,
+                          distances = disp.tampere$distances)
+disp.turku.df = data.frame(site = rep('Turku', length(disp.turku$group)),
+                          group = disp.turku$group,
+                          distances = disp.turku$distances)
+disp.all.df = rbind(disp.oulu.df, disp.tampere.df, disp.turku.df)
+
+#dispersion plot
+fresh_swap = c('#65ADC2', '#233B43', '#E84646', '#C29365', '#362C21', '#316675', '#168E7F', '#109B37')
+ggplot(disp.all.df, aes(group, distances)) + 
+  geom_boxplot(fill='white') +
+  facet_wrap(~site) +
+  ylab('Distance to centroid') + 
+  xlab('Age (months)') +
+  scale_color_manual(values=fresh_swap, name='Age at sampling (months)') +
+  theme_bw()
+
+```
+
+**Microbiota dispersion between subjects declines with age**. Pair-wise weighted Unifrac distances were calculated for all samples and stratified by site and collected in 3 month groups. Across all sites, dispersion of microbial composition was greatest in the earliest age group, 3 to 6 months, and declined and stabilized by 9 to 12 months of age.
+
+---
+
+#Identifying Differentially Abundant Taxa
+
+##Approach
+
+In the following section, generalized estimating equations (GEEs) are used to identify taxa associated with seroconversion. GEEs are applied at different taxonomic levels (all taxa at Phylum and Family levels, but only genera and species of significant Bacteroidetes and Proteobacteria families). An effect is considered significant if the FDR-adjusted p-value is <0.05. 
+
+Initially, only the simple formula ```Abundance~Age^2*serconverted, id=mask_id``` was considered. An adjusted formula was then tested for any taxa in which serocnversion status had a significant effect.
+
+Results were displayed graphically by sliding, smoothed plots of significant taxa from adjusted models. In an attempt to identify specific ages where the relative abundance of taxa had the greatest differences between cases and controls, as well as a secondary approach to validate the GEE results, Mann-Whitney test (with FDR correction, p<0.05) was performed. Mann-Whitney results were represented along the x-axis of the sliding smoothed plots, implemented with the ```geom_rug``` layer.
+
+Generalized estimating equations is a method which aims to estimate the average response over the population ('population-aaveraged' effects). Because high inter-individual variation in the microbiota was expected and demonstrated, GEEs were selected to test the population average relative abundances of taxa between cases and controls rather than attempting to model individual-specific effects. This method is commonly used in epidemiological studies, especially multi-site cohort studies because they can handle many types of unmeasured dependence between outcome. 
+
+##Phylum
+
+###Proteobacteria & Bacteroidetes are associated with seroconversion
+
+Initially, the simple model ```Abundance ~ Age^2*seroconverted, id = mask_id``` was considered in order to identify any phyla that are affected by seroconversion status. Based on PERMANOVA results, age and subject greatly influence microbial variation. Thus, subject effects were accounted for by specifying the argument ```id = mask_id```, and age was included in the model formula as an interaction term.
+
+Only significicant (FDR adjusted p-value < 0.05) are displayed.
+
+```{r phylum_sc_gee_prep}
+#long-format
+dipp.p.m = psmelt(dipp.p)
+dipp.p.m$mask_id  = factor(dipp.p.m$mask_id)
+```
+
+```{r releveling_phy_variables, echo=FALSE}
+#fix MoD_simp
+dipp.p.m$MoD_simp = ifelse(dipp.p.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+#fix Gender
+dipp.p.m$Gender = factor(dipp.p.m$Gender, labels=c('Female', 'Male'))
+#fix antibiotics
+dipp.p.m$antibiotics = as.logical(dipp.p.m$antibiotics)
+```
+
+```{r phylum_sc_gee}
+#run GEE 
+gee.p.sc = ddply(dipp.p.m, ~Phylum, function(x) test_sero_gee(x, 'Abundance'))
+
+#extract significant results
+sig.phy.sc.list = get_gee_sig_taxa(gee.p.sc, 0.05, c('seroconvertedTRUE', 'I(age_month^2):seroconvertedTRUE'))
+
+kable(subset(sig.phy.sc.list, Phylum %in% c('Bacteroidetes', 'Proteobacteria')))
+
+```
+
+####Figure 3A-B
+
+```{r Bact_Prot_plot, fig.width=15, fig.height=5}
+dipp.p.m2 = dipp.p.m[dipp.p.m$age_month <=21,]
+Prot = plot_gee_sig_taxa('Proteobacteria', dipp.p.m2, 'Abundance', 'Phylum', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Prot + coord_cartesian(ylim=c(0,0.35)) + geom_hline(yintercept=0, color='black') + ggtitle('Proteobacteria')
+
+#samples from C-section subjects were removed; see confounders section
+Bact = plot_gee_sig_taxa('Bacteroidetes', dipp.p.m2[dipp.p.m2$MoD_simp == 'Vaginal',], 'Abundance', 'Phylum', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Bact + coord_cartesian(ylim=c(0,0.8)) + geom_hline(yintercept=0, color='black') + ggtitle('Bacteroidetes')
+```
+
+**Figure 3A-B** ***Proteobacteria and Bacteroidetes*** While the relative abundance of Proteobacteria declines with age, it was associated with cases in Oulu, but controls in Turku, while no association was observed in Tampere. Meanwhile, the relative abundance of Bacteroidetes increased with age and was significantly associated with cases in Turku and to a lesser extent in Tampere, while the inverse relationship was significant in Oulu. 
+
+
+###Confounders & Bacteroidetes
+
+Based on previous results, an adjusted model was tested considering additional variables that had an effect on overall microbial variation (identified in the PERMANOVA section). While there was a distinction of initial trends by site, additional confounders did have a significant effect on Bacteroidetes but not Proteobacteria.
+
+####Figure 3C
+
+```{r Bact_gender, fig.height=4, fig.width=6}
+dipp.p.m.noC = dipp.p.m2[dipp.p.m2$MoD_simp =='Vaginal',]
+#variable of interest must be TRUE/FALSE == MALE/FEMALE
+dipp.p.m.noC$Gender = as.logical(as.numeric(dipp.p.m.noC$Gender)-1)
+#gender
+Bact.gender = plot_gee_sig_taxa_var('Bacteroidetes', dipp.p.m.noC, 'Abundance', 'Phylum', 'Gender', 'age_month', c('navy', 'salmon'))
+
+Bact.gender + coord_cartesian(ylim=c(0, 0.65)) + geom_hline(yintercept=0, color='black') + theme(legend.position = 'none') + ggtitle('Bacteroidetes & Gender')
+```
+
+**Figure 3C** ***Bacteroidetes and Gender*** Females (light pink color) tend to have higher relative abundance of Bacteroidetes compared to males (navy blue color). However, this difference was most evident near 13 months of age and did not persist across all ages sampled.
+
+```{r Bact_antibiotics, fig.height=4, fig.width=6}
+#antibiotics
+Bact.abx = plot_gee_sig_taxa_var('Bacteroidetes', dipp.p.m.noC, 'Abundance', 'Phylum', 'antibiotics', 'age_month', c('red', 'black'))
+
+Bact.abx + coord_cartesian(ylim=c(0,0.65)) + geom_hline(yintercept=0, color='black') + theme(legend.position = 'none') + ggtitle('Bacteroidetes & Antibiotics')
+```
+
+*Subjects that received antibiotics within the first 2 years of life are represented in **red**, those that did not receive antibiotics are in **black**.
+
+Initial results indicated that there was an effect of mode of delivery on Bacteroidetes. However, due to the small number of subjects born by C-section, they were excluded here.
+
+For Bacteroidetes, as previously reported, seroconversion was associated with higher relative abundance in Turku and Tampere, but the inverse was observed in Oulu when accounting for site, gender, receiving breast milk, and antibiotics within the first 2 years of life. Additionally, gender has a significant effect (observed across all sites) and tended to be higher in females. While antibiotic use also had a significant effect. 
+
+While Proteobacteria initially seemed to be associated with controls, the inverse effect was observed in Oulu. Meanwhile, there were no additional effects of any of the variables included in the adjusted model.
+
+```{r phylum_adjusted_gee}
+#make Turku the reference group
+dipp.p.m$site = factor(dipp.p.m$site, levels=c('Turku', 'Tampere', 'Oulu'))
+#extract only relevant phyla
+dipp.p.m.BP = subset(dipp.p.m, Phylum %in% c('Bacteroidetes', 'Proteobacteria'))
+#exclude C-section subjects
+dipp.p.m.BP.noC = dipp.p.m.BP[dipp.p.m.BP$MoD_simp == 'Vaginal',]
+
+#run adjusted GEE
+gee.p.adj = ddply(dipp.p.m.BP.noC, ~Phylum, function(x) test_adj_gee(x, 'Abundance'))
+
+
+gee.p.adj[gee.p.adj$p.adjust <=0.05,]
+```
+
+
+##Family
+
+After testing all 91 families, 25 had a significant association with seroconversion status using the simple formula ```Abundance ~ Age^2*seroconverted, id = mask_id```. Most of these families (17 of 25) were Proteobacteria, followed by Bacteroidetes (4 of 25) and Firmicutes (2 of 25). Focus was given to the most abundant members of Bacteroidetes and Proteobacteria:
+
+```{r family_sc_gee_prep}
+#long-format
+dipp.f.m = psmelt(dipp.f)
+dipp.f.m$mask_id  = factor(dipp.f.m$mask_id)
+```
+
+```{r releveling_fam_variables, echo=FALSE}
+#make Turku the reference group
+#dipp.f.m$site = factor(dipp.f.m$site, levels=c('Turku', 'Tampere', 'Oulu'))
+#fix MoD_simp
+dipp.f.m$MoD_simp = ifelse(dipp.f.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+#fix Gender
+dipp.f.m$Gender = factor(dipp.f.m$Gender, labels=c('Female', 'Male'))
+#fix antibiotics
+dipp.f.m$antibiotics = as.logical(dipp.f.m$antibiotics)
+```
+
+```{r family_sc_gee}
+#run GEE 
+gee.f.sc = ddply(dipp.f.m, ~Phylum+Family, function(x) test_sero_gee(x, 'Abundance'))
+
+#extract significant results
+sig.fam.sc.list = get_gee_sig_taxa(gee.f.sc, 0.05, c('seroconvertedTRUE', 'I(age_month^2):seroconvertedTRUE'))
+
+kable(subset(sig.fam.sc.list, Family %in% c('Bacteroidaceae', '[Paraprevotellaceae]', 'Enterobacteriaceae')))
+
+```
+
+```{r BP_family_plots, fig.width=15, fig.height=5}
+dipp.f.m2 = dipp.f.m[dipp.f.m$age_month <=21,]
+
+Ent = plot_gee_sig_taxa('Enterobacteriaceae', dipp.f.m2, 'Abundance', 'Family', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Ent + coord_cartesian(ylim=c(0,0.25)) + geom_hline(yintercept=0, color='black') + ggtitle('Enterobacteriaceae')
+
+#samples from C-section subjects were removed; see confounders section
+Bact.f = plot_gee_sig_taxa('Bacteroidaceae', dipp.f.m2[dipp.f.m2$MoD_simp == 'Vaginal',], 'Abundance', 'Family', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Bact.f + coord_cartesian(ylim=c(0,0.65)) + geom_hline(yintercept=0, color='black') + ggtitle('Bacteroidaceae')
+```
+
+Taxonomic differences were most apparent within Bacteroidetes (specifically the families Bacteroidaceae and [Paraprevotellaceae]) and Proteobacteria (specifically the family Enterobacteriaceae). Therefore, these families were selected and investigated at the genus and species levels.
+
+##Bacteroidetes - A Closer Look
+
+Bacteroidetes were extracted, taxa compressed to genus and species levels, then only taxa assigned to *Bacteroidaceae* and *[Paraprevotellaceae]* were considered in further analyses.
+
+###Genus
+
+```{r Bact_format, echo=FALSE}
+#extract Bacteroidetes
+dipp.TR.Bact = subset_taxa(dipp.TR.prop, Phylum == 'Bacteroidetes')
+
+#merge Bacteroides dorei & B. vulgatus
+taxBact = data.frame(tax_table(dipp.TR.Bact))
+taxBact$species2 = gsub("Bacteroides_dorei", "Bacteroides_dorei-vulgatus", taxBact$Species)
+taxBact$species = gsub("Bacteroides_vulgatus", "Bacteroides_dorei-vulgatus", taxBact$species2)
+taxBact$species = factor(taxBact$species)
+taxBact = taxBact[,c(1:6,10,8)]
+
+#add edited tax_table back to phyloseq object
+dipp.TR.Bact = phyloseq(otu_table(dipp.TR.Bact), sample_data(dipp.TR.Bact), tax_table(as.matrix(taxBact)))
+
+#compress to genus and species levels
+dipp.TR.Bact.g = tax_glom(dipp.TR.Bact, 'Genus')
+dipp.TR.Bact.s = tax_glom(dipp.TR.Bact, 'species')
+#long-format data.frames
+dipp.g.Bact.m = psmelt(dipp.TR.Bact.g)
+dipp.s.Bact.m = psmelt(dipp.TR.Bact.s)
+
+#extract Bacteroidaceae & [Paraprevotellaceae]
+dipp.g.BP.m = subset(dipp.g.Bact.m, Family %in% c('Bacteroidaceae', '[Paraprevotellaceae]'))
+dipp.s.BP.m = subset(dipp.s.Bact.m, Family %in% c('Bacteroidaceae', '[Paraprevotellaceae]'))
+
+#fix MoD_simp variables
+dipp.g.BP.m$MoD_simp = ifelse(dipp.g.BP.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+dipp.s.BP.m$MoD_simp = ifelse(dipp.s.BP.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+#fix Gender
+dipp.g.BP.m$Gender = factor(dipp.g.BP.m$Gender, labels=c('Female', 'Male'))
+dipp.s.BP.m$Gender = factor(dipp.s.BP.m$Gender, labels=c('Female', 'Male'))
+#fix antibiotics
+dipp.g.BP.m$antibiotics = as.logical(dipp.g.BP.m$antibiotics)
+dipp.s.BP.m$antibiotics = as.logical(dipp.s.BP.m$antibiotics)
+```
+
+At the genus level, Bacteroides and [Prevotella] dominated their respective families and the relationship between cases and controls remained significant.
+
+```{r genus_BP_gees}
+#run GEE 
+gee.gB.sc = ddply(dipp.g.BP.m, ~Phylum+Family+Genus, function(x) test_sero_gee(x, 'Abundance'))
+
+#extract significant results
+sig.genBP.sc.list = get_gee_sig_taxa(gee.gB.sc, 0.05, c('seroconvertedTRUE', 'I(age_month^2):seroconvertedTRUE'))
+
+kable(subset(sig.genBP.sc.list, Genus %in% c('Bacteroides', '[Prevotella]')))
+```
+
+```{r gen_BP_plots, fig.height=4, fig.width=15}
+dipp.g.BP.m2 = dipp.g.BP.m[dipp.g.BP.m$age_month <=21,]
+dipp.g.BP.m.noC = dipp.g.BP.m2[dipp.g.BP.m2$MoD_simp == 'Vaginal',]
+
+Bact.g = plot_gee_sig_taxa('Bacteroides', dipp.g.BP.m.noC, 'Abundance', 'Genus', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Bact.g + coord_cartesian(ylim=c(0,0.65)) + geom_hline(yintercept=0, color='black') + ggtitle('Bacteroides')
+
+#samples from C-section subjects were removed; see confounders section
+Prev.g = plot_gee_sig_taxa('[Prevotella]', dipp.g.BP.m.noC, 'Abundance', 'Genus', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Prev.g + coord_cartesian(ylim=c(0,0.02)) + geom_hline(yintercept=0, color='black') + ggtitle('[Prevotella]')
+```
+
+Adjusted models were considered for Bacteroides and [Prevotella]. Gender and antibiotics also had an effect on the relative abundance of Bacteroidetes at the genus level for Bacteroides. Antibiotics, but not gender, had an effect on the relative abundance of [Prevotella].
+
+```{r BP_genus_adjusted_gee}
+#make Turku the reference group
+dipp.g.BP.m.noC$site = factor(dipp.g.BP.m.noC$site, levels=c('Turku', 'Tampere', 'Oulu'))
+#extract only relevant genera
+dipp.g.BP.m.noC = subset(dipp.g.BP.m.noC, Genus %in% c('Bacteroides', '[Prevotella]'))
+
+#run adjusted GEE
+gee.g.BP.adj = ddply(dipp.g.BP.m.noC, ~Genus, function(x) test_adj_gee(x, 'Abundance'))
+
+#extract significant results implicating seroconversion
+gee.g.BP.adj[gee.g.BP.adj$p.adjust <= 0.05,]
+
+```
+
+###Species
+
+At the species level, the strong association of Bacteroides and cases is mainly attributed to *Bacteroides dorei-vulgatus* in Turku, although this trend was not observed in the other 2 sites. The relative abundance of *[Prevotella] spp.* (referred to in the manuscript as *Paraprevotella spp.*) was associated with cases in Tampere and Turku. Meanwhile the inverse association of Bacteroides in Oulu was primarily attributed to *Bacteroides fragilis*, whose relative abundance was higher in controls in both Oulu and Tampere, but not observed in Turku.
+
+```{r spec_BP_plots, fig.height=4, fig.width=15}
+dipp.s.BP.m2 = dipp.s.BP.m[dipp.s.BP.m$age_month <=21,]
+dipp.s.BP.m.noC = dipp.s.BP.m2[dipp.s.BP.m2$MoD_simp == 'Vaginal',]
+
+Bdv.s = plot_gee_sig_taxa('Bacteroides_dorei-vulgatus', dipp.s.BP.m.noC, 'Abundance', 'species', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Bdv.s + coord_cartesian(ylim=c(0,0.30)) + geom_hline(yintercept=0, color='black') + ggtitle('Bacteroides dorei-vulgatus')
+
+Prev.s = plot_gee_sig_taxa('[Prevotella]_', dipp.s.BP.m.noC, 'Abundance', 'species', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Prev.s + coord_cartesian(ylim=c(0,0.02)) + geom_hline(yintercept=0, color='black') + ggtitle('[Prevotella] spp.')
+
+B.frag = plot_gee_sig_taxa('Bacteroides_fragilis', dipp.s.BP.m.noC, 'Abundance', 'species', 'seroconverted', 'seroconverted', 'site', 'age_month')
+B.frag + coord_cartesian(ylim=c(0,0.15)) + geom_hline(yintercept=0, color='black') + ggtitle('Bacteroides fragilis')
+```
+
+
+```{r species_BP_gees}
+#relevel site
+dipp.s.BP.m.noC$site = factor(dipp.s.BP.m.noC$site, levels=c('Turku', 'Tampere', 'Oulu'))
+#extract only Bacteroides & [Prevotella]
+dipp.s.BP.m.noC.BP = subset(dipp.s.BP.m.noC, Genus %in% c('Bacteroides', '[Prevotella]'))
+
+#run GEE 
+gee.s.BP.sc = ddply(dipp.s.BP.m.noC.BP, ~Phylum+Family+Genus+species, function(x) test_sero_gee(x, 'Abundance'))
+#run adjusted GEE
+gee.s.BP.adj = ddply(dipp.s.BP.m.noC.BP, ~Phylum+Family+Genus+species, function(x) test_adj_gee(x, 'Abundance'))
+
+#extract significant results
+sig.spec.BP.sc.list = get_gee_sig_taxa(gee.s.BP.sc, 0.05, c('seroconvertedTRUE', 'I(age_month^2):seroconvertedTRUE')) 
+  ##only Bacteroides dorei-vulgatus and [Prevotella] have a significant association under the simple formula
+sig.spec.BP.adj.list = get_gee_sig_taxa(gee.s.BP.adj, 0.05, c('seroconvertedTRUE', 'seroconvertedTRUE:siteTampere', 'seroconvertedTRUE:siteOulu')) 
+
+kable(subset(sig.spec.BP.adj.list, species %in% c('Bacteroides_dorei-vulgatus', 'Bacteroides_fragilis', '[Prevotella]_')))
+
+```
+
+
+
+##Proteobacteria - A Closer Look
+
+###Genus
+
+There were 11 genera assigned to *Enterobacteriaceae*. **Serratia** and **Shigella** was selected for further investigation based on a significant GEE result and median relative abundance >0.1%. However, these trends varied by site, while similar to at the phylum level, additional variables considered in the adjusted models did not have a significant effect. Shigella was associated with controls in Turku, but this trend was not observed in the other 2 sites. Meanwhile, Shigella was associated with cases in Oulu, but not observed in Tampere or Turku.
+
+```{r Prot_prep, echo=FALSE}
+#extract Enterobacteriaceae
+dipp.TR.Ent = subset_taxa(dipp.TR.prop, Family == 'Enterobacteriaceae')
+
+#compress to genus and species levels
+dipp.TR.Ent.g = tax_glom(dipp.TR.Ent, 'Genus')
+dipp.TR.Ent.s = tax_glom(dipp.TR.Ent, 'Species')
+
+#long-format data.frames
+dipp.TR.Ent.g.m = psmelt(dipp.TR.Ent.g)
+dipp.TR.Ent.s.m = psmelt(dipp.TR.Ent.s)
+
+#fix MoD_simp variables
+dipp.TR.Ent.g.m$MoD_simp = ifelse(dipp.TR.Ent.g.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+dipp.TR.Ent.s.m$MoD_simp = ifelse(dipp.TR.Ent.s.m$MoD_simp > 1, c('Vaginal'), c('C-section'))
+#fix Gender
+dipp.TR.Ent.g.m$Gender = factor(dipp.TR.Ent.g.m$Gender, labels=c('Female', 'Male'))
+dipp.TR.Ent.s.m$Gender = factor(dipp.TR.Ent.s.m$Gender, labels=c('Female', 'Male'))
+#fix antibiotics
+dipp.TR.Ent.g.m$antibiotics = as.logical(dipp.TR.Ent.g.m$antibiotics)
+dipp.TR.Ent.s.m$antibiotics = as.logical(dipp.TR.Ent.s.m$antibiotics)
+```
+
+```{r genus_Ent_plots, fig.height=4, fig.width=15}
+dipp.TR.Ent.g.m2 = dipp.TR.Ent.g.m[dipp.TR.Ent.g.m$age_month <=21,]
+
+Serr.g = plot_gee_sig_taxa('Serratia', dipp.TR.Ent.g.m2, 'Abundance', 'Genus', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Serr.g + coord_cartesian(ylim=c(0,0.035)) + geom_hline(yintercept=0, color='black') +ggtitle('Serratia')
+
+Shig.g = plot_gee_sig_taxa('Shigella', dipp.TR.Ent.g.m2, 'Abundance', 'Genus', 'seroconverted', 'seroconverted', 'site', 'age_month')
+Shig.g + coord_cartesian(ylim=c(0,0.08)) + geom_hline(yintercept=0, color='black') + ggtitle('Shigella')
+```
+
+
+```{r genus_Ent_gee}
+#relevel site
+dipp.TR.Ent.g.m$site = factor(dipp.TR.Ent.g.m$site, levels=c('Turku', 'Tampere', 'Oulu'))
+
+#run adjusted GEE
+gee.g.Ent.adj = ddply(dipp.TR.Ent.g.m, ~Phylum+Family+Genus, function(x) test_adj_gee(x, 'Abundance'))
+
+sig.gen.Ent.adj.list = get_gee_sig_taxa(gee.g.Ent.adj, 0.05, c('seroconvertedTRUE', 'seroconvertedTRUE:siteTampere', 'seroconvertedTRUE:siteOulu')) 
+gee.adj.Serr = gee.g.Ent.adj[gee.g.Ent.adj$Genus == 'Serratia',]
+gee.adj.Shig = gee.g.Ent.adj[gee.g.Ent.adj$Genus == 'Shigella',]
+
+kable(subset(sig.gen.Ent.adj.list, Genus %in% c('Serratia', 'Shigella')))
+```
+
+###Species
+
+The majority of reads assigned to *Serratia* and *Shigella* were attributed to *Serratia marcescens* and *Shigella sonnei*, respectively. These species were selected for their significant association with seroconversion based on GEE results and for having a median relative abundance >0.1%. It should be noted that there are inverse effects across sites. However, due to the low relative abundance of *Serratia* in Oulu and Tampere and *Shigella* in Turku, we cannot reliably quantify these species in those respective sites.
+
+```{r species_Ent_plots, fig.width=15, fig.height=4}
+dipp.TR.Ent.s.m2 = dipp.TR.Ent.s.m[dipp.TR.Ent.s.m$age_month <=21,]
+
+SerrM.g = plot_gee_sig_taxa('Serratia_marcescens', dipp.TR.Ent.s.m2, 'Abundance', 'Species', 'seroconverted', 'seroconverted', 'site', 'age_month')
+SerrM.g + coord_cartesian(ylim=c(0,0.035)) + geom_hline(yintercept=0, color='black') +ggtitle('Serratia marcescens')
+
+ShigS.g = plot_gee_sig_taxa('Shigella_sonnei', dipp.TR.Ent.s.m2, 'Abundance', 'Species', 'seroconverted', 'seroconverted', 'site', 'age_month')
+ShigS.g + coord_cartesian(ylim=c(0,0.08)) + geom_hline(yintercept=0, color='black') + ggtitle('Shigella sonnei')
+```
+
+
+```{r species_Ent_gee}
+#relevel site
+dipp.TR.Ent.s.m$site = factor(dipp.TR.Ent.s.m$site, levels=c('Turku', 'Tampere', 'Oulu'))
+#extract only Shigella and Serratia
+dipp.TR.Ent.s.m.SS = subset(dipp.TR.Ent.s.m, Genus %in% c('Serratia', 'Shigella'))
+
+#run GEE 
+gee.s.Ent.sc = ddply(dipp.TR.Ent.s.m.SS, ~Phylum+Family+Genus+Species, function(x) test_sero_gee(x, 'Abundance'))
+#run adjusted GEE
+gee.s.Ent.adj = ddply(dipp.TR.Ent.s.m.SS, ~Phylum+Family+Genus+Species, function(x) test_adj_gee(x, 'Abundance'))
+
+#extract significant results
+sig.spec.Ent.sc.list = get_gee_sig_taxa(gee.s.Ent.sc, 0.05, c('seroconvertedTRUE', 'I(age_month^2):seroconvertedTRUE')) 
+sig.spec.Ent.adj.list = get_gee_sig_taxa(gee.s.Ent.adj, 0.05, c('seroconvertedTRUE', 'seroconvertedTRUE:siteTampere', 'seroconvertedTRUE:siteOulu')) 
+
+gee.adj.Serr.s = gee.g.Ent.adj[gee.g.Ent.adj$Genus == 'Serratia',]
+gee.adj.Shig.s = gee.g.Ent.adj[gee.g.Ent.adj$Genus == 'Shigella',]
+
+
+kable(subset(sig.spec.Ent.adj.list, Species %in% c('Serratia_marcescens', 'Shigella_sonnei')))
+```
+
+
+---
+
+#References
+
+- [knitr](https://yihui.name/knitr/) Yihui Xie (2016). knitr: A General-Purpose Package for Dynamic Report Generation in R. R package version 1.15.1.
+- [phyloseq](http://dx.plos.org/10.1371/journal.pone.0061217) phyloseq: An R package for reproducible interactive analysis and graphics of microbiome census data. Paul J. McMurdie and Susan Holmes (2013) PLoS ONE 8(4):e61217.
+- [vegan](https://CRAN.R-project.org/package=vegan) Jari Oksanen, F. Guillaume Blanchet, Michael Friendly, Roeland Kindt, Pierre Legendre, Dan McGlinn, Peter R. Minchin, R. B. O'Hara, Gavin
+  L. Simpson, Peter Solymos, M. Henry H. Stevens, Eduard Szoecs and Helene Wagner (2017). vegan: Community Ecology Package. R package
+  version 2.4-2.
+- [geepack](https://cran.r-project.org/web/packages/geepack/geepack.pdf) HÃ¸jsgaard, S., Halekoh, U. & Yan J. (2006) The R Package geepack for Generalized Estimating Equations Journal of Statistical Software,
+  15, 2, pp1--11
+- [Unifrac](http://aem.asm.org/content/73/5/1576) Lozupone, C. A.; Hamady, M; Kelley, S. T.; Knight, R. (2007). "Quantitative and qualitative beta diversity measures lead to different insights into factors that structure microbial communities". Applied and Environmental Microbiology 73 (5): 1576–85. doi:10.1128/AEM.01996-06.
+- **Bray-Curtis** Legendre, Pierre, and Louis Legendre. “Numerical Ecology”. 3rd ed. Vol. 24: Elsevier, 2012. Print.
+- [R](https://www.R-project.org/) R Core Team (2016). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria.

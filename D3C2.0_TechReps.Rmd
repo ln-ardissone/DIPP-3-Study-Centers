@@ -1,0 +1,1306 @@
+---
+title: "DIPP 3 Cities - Analysis of Technical Replicates"
+author: "Lexi Ardissone"
+date: "June 29, 2016"
+output: html_document
+---
+
+```{r, include=FALSE}
+library(knitr)
+opts_chunk$set(cache.path = '/tmp/knitrcache4')
+knitr::opts_chunk$set(cache=T)
+#library(ggthemr)
+#ggthemr('fresh')
+#use ggthemr_reset() to clear theme
+```
+
+```{r required_pkgs, message=FALSE, warning=FALSE, echo=FALSE}
+source('~/Desktop/D3C/D3C_functions_4.0.R')
+#This source file is used solely for loading required packages
+#none of the functions from this source file are called in this 'TechReps.Rmd'
+```
+
+#Introduction
+
+In this document samples that were replicated across extractions, PCR-amplicon generation, sequencing run and lane were evaluated. The goal of this Rmd is 2-fold:
+
+1. Assess microbial variance due to technical effects and hence determine if there is considerable batch-effect.
+2. Estimate the limit of quantification for measuring relative abundance of bacterial taxa through 16S rRNA sequencing using Illumina HiSeq 2000 platform.
+
+---
+
+#Description of Technical Replicates
+
+Load data
+
+```{r import, message=FALSE, warning=FALSE}
+#load phyloseq object containing all D3C samples
+load('~/Desktop/D3C/D3C_2.0/1_inputs/input_files/dipp_6-20-16.Rdata')
+dipp
+#Select TechReps samples
+dipp.reps = subset_samples(dipp, TechReps == 'TRUE')
+#remove reps due to reseuencing (at least 1 rep is 'defective...that's why it was resequenced)
+dipp.reps = subset_samples(dipp.reps, TechRep_type != 'reseq')
+#remove reps with <20,000 reads (being consistent with previous sample filtering parameters)
+dipp.reps2 = prune_samples(sample_sums(dipp.reps) >= 20000, dipp.reps)
+#extract metadata
+reps.meta = data.frame(sample_data(dipp.reps2))
+```
+
+A total of ```r length(unique(reps.meta$sample_id))``` unique samples from ```r length(unique(reps.meta$mask_id))``` subjects were replicated giving a total of ```r nrow(reps.meta)``` sequenced replicates.
+
+The number of replicates for each replicate type, sequencing run, and lane and the number of subjects these replicates correspond to is as follows:
+
+```{r rep_type_count, warning=FALSE, message=FALSE, echo=FALSE}
+ddply(reps.meta, 
+      ~site+TechRep_type+HS_run+illumina_lane, 
+      function(x) c(Reps = nrow(x),
+                    nsamples=length(unique(x$sample_id)),
+                    nsubjects=length(unique(x$mask_id))))
+```
+
+Below is a list of the relevant ```TechRep_type``` comparisons:
+
+* when ```TechRep_type == lane```: 
+    + In order to assess lane to lane variability, compare ```TechRep_type==lane``` (4) for each ```sample_id```.
+    + all reps sequenced of HiSeq run 1 across 4 different lanes
+    + all reps were from the same DNA extract and PCR reaction (same barcode)
+    + e.g. ```illumina_id``` for 4 lane reps: ```HS1_L1_B009```, ```HS1_L2_B009```, ```HS1_L3_B009```, ```HS1_L4_B009```
+    + Expectation: some lane variability, but overall very similar
+* when ```TechRep_type == run```: 
+    + In order to assess HiSeq run to HiSeq run variability, compare ```TechRep_type==run``` (1) to ```TechRep_type==lane``` (4) for each ```sample_id```
+    + all ```run``` reps were sequenced on HiSeq run 2, lane 1 (compared to HiSeq run 1 for ```lane``` reps)
+    + all ```run``` reps were from the same DNA extract and PCR reaction (same barcode) as the ```lane``` reps
+    + e.g. ```illumina_id```: 1 run rep ```HS2_L1_B009``` vs. 4 lane reps ```HS1_L1_B009```, ```HS1_L2_B009```, ```HS1_L3_B009```, ```HS1_L4_B009```
+    + Expectation: more variability between run and lane reps than within lane reps
+* when ```TechRep_type == pcr```: 
+    + In order to assess variability due to different PCR reactions, compare ```TechRep_type==pcr``` (1) to ```TechRep_type==run``` for each ```sample_id```
+    + all ```pcr``` reps were sequenced on HiSeq run 2, lane 1 (same as all ```run``` reps) 
+    + all ```pcr``` reps were from different PCR reactions as ```run``` reps but from the same DNA extract (eliminates any lane or extraction effects)
+    + e.g. ```illumina_id```: 1 pcr rep ```HS2_L1_B006``` vs. 1 run rep ```HS2_L1_B009```
+    + Expectation: some variability between PCR reps within a given sample from the sample DNA extract (but not as much as to be expected with the extraction rep)
+* when ```TechRep_type == extraction```: 
+    + In order to assess variability due to different DNA extractions, compare ```TechRep_type==extraction``` (1) to ```TechRep_type == run/pcr``` (2) for each ```sample_id```
+    + all ```extraction``` reps were sequenced on HiSeq run 2, lane 1 (same as all ```run``` and ```pcr``` reps) 
+    + all ```extraction``` reps were from different extractions and PCR reactions as ```run``` and ```pcr``` reps (wanted to eliminate any lane effect, but can't have the same barcode on reps in the same lane, so the comparison is really extraction+pcr variability)
+    + e.g. ```illumina_id```: 1 extraction rep ```HS2_L1_B064``` vs. 1 run rep ```HS2_L1_B009``` and 1 pcr rep ```HS2_L1_B006```
+    + Expectation: more variability between the extraction rep than the run and pcr reps
+
+---
+
+#Assessing Variation Attributed to Technical Effects
+
+In this section we aim to quantify the amount of microbial variation is attributed to each technical process within each sample with technical replicates.
+
+**What are batch effects?**
+
+>*"Batch effects are sub-groups of measurements that have qualitatively different behavior across conditions and are unrelated to biological or scientific variables in a study"* Leek et al., 2010
+
+This can include different sequencing runs, lanes, personnel, extractions, reagent batches, and a myriad of other technical variants involved in sample prep and sequencing.
+
+Luckily though, high-throughput technologies return enough data to detect and even remove batch effects.
+
+Normalization is a data analysis technique that adjust global properties of measurements for individual samples so that they can be more appropriately compared BUT normalization does not remove batch effects!
+
+Ordination analysis was performed using commonly used dissimilarity/distance measures (Bray & Unifrac - weighted & unweighted) with NMDS and PCoA, respectively. 
+
+**Bray Dissimilarity**
+:    quanitfies the *compositional* dissimilarity between 2 samples (considers presence/absence & abundance).
+
+**Jaccard Dissimilarity**
+:    quantifies the dissimilarity between 2 samples (considers presence/absence).
+
+**Weighted-Unifrac** 
+:   a *quantitative* (accounts for abundance) assessment of microbial composition which accounts for phylogenetic relatedness of community members.
+
+**Unweighted-Unifrac**
+:    a *qualitative* (presence/absence) assessment of microbial composition which accounts for phylogentic relatedness of community members.
+
+```{r add_tree, warning=FALSE, message=FALSE, fig.width=15, fig.height=15, echo=FALSE, eval=FALSE}
+#Some method of normalizing reads is typically suggested, 
+#although rarefying has come under some scrutiny.
+#Here, rather than rarefying, I multiply the proportion by 60,000
+#analyses are performed using both normalized and raw counts for comparisons
+
+#load phylogenetic tree need for unifrac methods
+gg_tree = read_tree_greengenes('~/Desktop/D3C/D3C_2.0/1_inputs/input_files/gg_13_8.97_otus.tree')
+dipp.reps2.tree = merge_phyloseq(dipp.reps2, gg_tree)
+#removes OTUs with 0 counts
+dipp.reps3.tree = filter_taxa(dipp.reps2.tree, function(x) sum(x) >= 1, TRUE)
+
+#normalize raw counts
+dipp.reps2.tree.depth = transform_sample_counts(dipp.reps3.tree, function(x) round(1e+06 * x/sum(x), 0))
+
+#40,000+ OTUs is a lot of variable for ordination analyses --> but filtering this down sort of defeats the purpose of this analysis on replicates
+#some filtering is needed though...can't extract the OTU rable from the phyloseq object when ~40K OTUs
+```
+
+```{r calc_oridnation, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#calculate NMDS-Bray ordination
+reps.ord = ordinate(dipp.reps2, 'NMDS', 'bray')
+##do same for normalized data...
+reps.ord.depth = ordinate(dipp.reps2.tree.depth, 'NMDS', 'bray')
+
+#calculate Jaccard ordination
+reps.jac = ordinate(dipp.reps2, 'NMDS', 'jaccard')
+##do same for normalized data...
+reps.jac.depth = ordinate(dipp.reps2.tree.depth, 'NMDS', 'jaccard')
+
+#calculate Unweighted Unifrac PCoA ordination
+reps.UUF = ordinate(dipp.reps2.tree, "PCoA", "unifrac", weighted=FALSE)
+##do same for normalized data...
+reps.UUF.depth = ordinate(dipp.reps2.tree.depth, 'PCoA', 'unifrac', weighted=FALSE)
+
+#calculate Weighted Unifrac PCoA ordination
+reps.WUF = ordinate(dipp.reps2.tree, "PCoA", "unifrac", weighted=TRUE)
+##do same for normalized data...
+reps.WUF.depth = ordinate(dipp.reps2.tree.depth, 'PCoA', 'unifrac', weighted=TRUE)
+
+#Save ordination calculations
+save(dipp.reps2.tree, file = '~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps.tree.Rdata')
+save(reps.ord, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.ord.Rdata')
+save(reps.ord.depth, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.ord.depth.Rdata')
+save(reps.jac, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.jac.Rdata')
+save(reps.jac.depth, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.jac.depth.Rdata')
+save(reps.UUF, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.UUF.Rdata')
+save(reps.UUF.depth, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.UUF.depth.Rdata')
+save(reps.WUF, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.WUF.Rdata')
+save(reps.WUF.depth, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.WUF.depth.Rdata')
+```
+
+```{r import_ordination_calc, message=FALSE, warning=FALSE, echo=FALSE}
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps.tree.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.ord.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.jac.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.UUF.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/reps.WUF.Rdata')
+```
+
+```{r ordination_plots1, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#define color scheme
+fresh_swap = c('#65ADC2', '#233B43', '#E84646', '#C29365', '#362C21', '#316675', '#168E7F', '#109B37')
+#plot
+plot_ordination(dipp.reps2, reps.UUF, color='TechRep_type') +
+  facet_wrap(~sample_id) + 
+  scale_color_manual(values= fresh_swap)
+  
+```
+
+Visualizing all data points on an ordination plot is a bit difficult, so a subset has been plotted here. This includes all technical replicates for 4 different specimens. This subset includes 3 samples, each from a different subject collected ~3-4 months of age, and an additional sample from one of these three subjects but collected ~15 months of age. Lane technical replicates for each sample appear very close and have consdierable overlap. Whereas, sequencing run and PCR technical replicates show a bit more diversion, while still extraction replicates show the greatest amount of diversion. Subject and age of sampling differences are apparent, which can be seen be looking at the clustering of technical replicates which correspond to each subject. 
+
+```{r ordination_subset,echo=FALSE, warning=FALSE, message=FALSE, fig.width=15}
+#select 4 unique samples
+reps.subset = c(24, 25, 188, 393)
+dipp.reps2.subset = subset_samples(dipp.reps2, sample_id %in% reps.subset)
+
+#get summary metadata on samples
+ddply(sample_data(dipp.reps2.subset), 
+      ~sample_id+site+mask_id, 
+      function(x) c(Reps = nrow(x),
+                    age = unique(x$age_at_sampling)))
+
+#extract coordinates from ordination objects
+ord.coord.BC = reps.ord$points
+ord.coord.jac = reps.jac$points
+ord.coord.WUF = reps.WUF$vectors
+ord.coord.UUF = reps.UUF$vectors
+#extract only subset samples
+subset.ids = row.names(sample_data(dipp.reps2.subset))
+ord.coord.BC.subset = ord.coord.BC[subset.ids,]
+ord.coord.jac.subset = ord.coord.jac[subset.ids,]
+ord.coord.WUF.subset = ord.coord.WUF[subset.ids,]
+ord.coord.UUF.subset = ord.coord.UUF[subset.ids,]
+#merge metadata
+ord.coord.BC.subset2 = cbind(ord.coord.BC.subset, sample_data(dipp.reps2.subset))
+ord.coord.jac.subset2 = cbind(ord.coord.jac.subset, sample_data(dipp.reps2.subset))
+ord.coord.WUF.subset2 = cbind(ord.coord.WUF.subset, sample_data(dipp.reps2.subset))
+ord.coord.UUF.subset2 = cbind(ord.coord.UUF.subset, sample_data(dipp.reps2.subset))
+
+#plot ordination of subset
+##define color scheme
+fresh_swap = c('#65ADC2', '#233B43', '#E84646', '#C29365', '#362C21', '#316675', '#168E7F', '#109B37')
+p1 = ggplot(ord.coord.BC.subset2, aes(MDS1, MDS2, color=TechRep_type, shape=factor(mask_id))) +
+  geom_point(size=5) +
+  theme_bw() +
+  ggtitle("Bray-Curtis distance NMDS") +
+  scale_color_manual(values= fresh_swap) +
+  ylab('NMDS2') +
+  xlab('NMDS1')
+p2 = ggplot(ord.coord.jac.subset2, aes(MDS1, MDS2, color=TechRep_type, shape=factor(mask_id))) +
+  geom_point(size=5) +
+  theme_bw() +
+  ggtitle("Jaccard distance NMDS") +
+  scale_color_manual(values= fresh_swap) +
+  ylab('NMDS2') +
+  xlab('NMDS1')
+p3 = ggplot(ord.coord.WUF.subset2, aes(Axis.1, Axis.2, color=TechRep_type, shape=factor(mask_id))) +
+  geom_point(size=5) +
+  theme_bw() +
+  ggtitle("Weighted-Unifrac distance PCoA") +
+  xlab('Axis.1 (67.2%)') +
+  ylab('Axis.2 (9.1%)') +
+  scale_color_manual(values= fresh_swap)
+p4 = ggplot(ord.coord.UUF.subset2, aes(Axis.1, Axis.2, color=TechRep_type, shape=factor(mask_id))) +
+  geom_point(size=5) +
+  theme_bw() +
+  ggtitle("Unweighted-Unifrac distance PCoA") +
+  xlab('Axis.1 (7.7%)') +
+  ylab('Axis.2 (6.2%)') +
+  scale_color_manual(values= fresh_swap)
+
+grid.arrange(p1, p2, p3, p4, nrow=1)
+```
+
+##Microbial Variation Attributed to Technical Processes
+
+Non-parametric, permutational MANOVA (*adonis* function) was applied in order to determine the amount of microbial variation attributed to each technical process included in this experimental design. Samples were subsetted from a phylsoeq object based on relevant comparisons. Then OTUs and metadata tables were extracted, which served as input for the ```adonis()``` function (included in the *vegan* package). All tests were stratified by ```sample_id``` which would restrict assessment of variation only within replicates from the same sample. Only code for ```adonis()``` using the *Bray* distance metric is shown, though analyses were also performed using *Jaccard*, *Unweighted Unifrac*, and *Weighted Unifrac* distances. These functions are not being executed in the Rmd, and the primary results are reported in a summary table below.
+
+For this section reads were transformed to proportions and ~51K OTUs were compressed to the Species level, reducing the number of taxa to consider ~3,000.
+
+```{r species, warning=FALSE, message=FALSE, eval=FALSE}
+#transform counts to proportions
+dipp.reps2.prop = transform_sample_counts(dipp.reps2, function(x) x/sum(x))
+#Compress OTUs to Species names (reduces from ~50K OTUs to 3,113)
+dipp.reps2.prop.s = tax_glom(dipp.reps2.prop, taxrank = 'Species')
+#melt phyloseq object 
+dipp.reps.m = psmelt(dipp.reps2.prop.s)
+```
+
+```{r import_glom, message=FALSE, warning=FALSE, echo=FALSE}
+#save(dipp.reps2.prop.s, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps2.prop.s.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps2.prop.s.Rdata')
+#write.csv(dipp.reps.m, file = '~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps2.m.csv')
+#Add phylogenetic tree
+dipp.reps2.prop.s.tree = merge_phyloseq(dipp.reps2.prop.s, gg_tree)
+
+#takes a few minutes to load
+dipp.reps.m = read.csv('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps2.m.csv')
+
+#subset phyloseq object based on rep type
+dipp.reps2.prop.s.turku = subset_samples(dipp.reps2.prop.s.tree, site == 'Turku')
+dipp.reps2.prop.s.extractionA = subset_samples(dipp.reps2.prop.s.turku, TechRep_type == 'extraction')
+dipp.reps2.prop.s.pcrA = subset_samples(dipp.reps2.prop.s.turku, TechRep_type == 'pcr')
+dipp.reps2.prop.s.runA = subset_samples(dipp.reps2.prop.s.turku, TechRep_type == 'run')
+dipp.reps2.prop.s.lane = subset_samples(dipp.reps2.prop.s.turku, TechRep_type == 'lane')
+
+##excluding lane reps not present in other rep types
+samp30 = unique(get_variable(dipp.reps2.prop.s.runA, 'sample_id'))
+dipp.reps2.prop.s.laneA = subset_samples(dipp.reps2.prop.s.lane, sample_id %in% samp30)
+dipp.reps2.prop.s.runVlane = merge_phyloseq(dipp.reps2.prop.s.laneA, dipp.reps2.prop.s.runA)
+dipp.reps2.prop.s.pcrVrun = merge_phyloseq(dipp.reps2.prop.s.pcrA, dipp.reps2.prop.s.runA)
+dipp.reps2.prop.s.pcrVlane = merge_phyloseq(dipp.reps2.prop.s.pcrA, dipp.reps2.prop.s.laneA)
+dipp.reps2.prop.s.extractVpcr = merge_phyloseq(dipp.reps2.prop.s.extractionA, dipp.reps2.prop.s.pcrA)
+dipp.reps2.prop.s.extractVlane = merge_phyloseq(dipp.reps2.prop.s.extractionA, dipp.reps2.prop.s.laneA)
+
+##other comparisons of interest...
+#dipp.reps2.prop.s.lane1 = subset_samples(dipp.reps2.prop.s.laneA, illumina_lane == '3')
+
+#dipp.reps2.prop.s.runVlane1 = merge_phyloseq(dipp.reps2.prop.s.lane1, dipp.reps2.prop.s.runA)
+
+#extract otus & meta for relavent comparisons
+##A.reads = data.frame(otu_table(dipp.reps2.prop.s.runVlane), check.names=F)
+##B.reads = data.frame(otu_table(dipp.reps2.prop.s.runVlane1), check.names=F)
+##A.meta = data.frame(sample_data(dipp.reps2.prop.s.runVlane))
+##B.meta = data.frame(sample_data(dipp.reps2.prop.s.runVlane1))
+
+
+#considered magnitude of counts could affect adonis results
+##R2 values were comparable to when using proportion --> 
+##magnitude of counts doesn't appear to affect results
+##adon.reads.1000 = data.frame(otu_table(dipp.reps2.1000.s), check.names=F)
+##adon.meta.1000 = data.frame(sample_data(dipp.reps2.1000.s))
+
+#Comparing effect of excluding samples without reps across all rep types & limiting lane reps
+##includes all lane & run reps
+###adonis(adon.reads.run~illumina_lane+HS_run, data=adon.meta.run, method='bray', strata=adon.meta.run$sample_id)
+##includes only lane reps with corresponding run rep
+#adonis(A.reads~illumina_lane+HS_run, data=A.meta, method='bray', strata=A.meta$sample_id)
+##includes only 1 lane rep for 1 corresponding run rep
+#adonis(B.reads~HS_run, data=B.meta, method='bray', strata=B.meta$sample_id)
+```
+
+>*adonis lane*
+
+Lane replicates for each sample were performed on the same sequencing run, amplicons were generated in the same PCR reaction, and DNA was from the same extraction, thus eliminating extraction, PCR, or sequencing run effects.
+
+```{r adonis_lane, warning=FALSE, message=FALSE, eval=FALSE}
+#extract otus & meta for each subset --> used for adonis
+adon.reads.lane = data.frame(otu_table(dipp.reps2.prop.s.lane), check.names=F)
+adon.meta.lane = data.frame(sample_data(dipp.reps2.prop.s.lane))
+
+#adonis on lane, only lane samples
+adonis(adon.reads.lane~illumina_lane, data=adon.meta.lane, method='bray', strata=adon.meta.lane$sample_id)
+```
+
+```{r adonis_lane2, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#This chunk stores the commands used to test adonis using other distance metrics and is not executed in this .Rmd
+UF.dist.lane = phyloseq::distance(dipp.reps2.prop.s.lane, method='unifrac')
+WF.dist.lane = phyloseq::distance(dipp.reps2.prop.s.lane, method='wunifrac')
+
+#adonis on lane, only lane samples
+##Jaccard distance
+adonis(adon.reads.lane~illumina_lane, data=adon.meta.lane, method='jaccard', strata=adon.meta.lane$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.lane~illumina_lane, data=adon.meta.lane, strata=adon.meta.lane$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.lane~illumina_lane, data=adon.meta.lane, strata=adon.meta.lane$sample_id)
+```
+
+>*adonis sequencing run*
+
+Sequencing run replicates for each sample were derived from the some DNA extract and PCR reaction, thus elimiating any effect of these processes on these results. However, because one cannot achieve a sequencing run replicate without also getting a lane replicate, lane effects cannot be eliminated from the analyses. Therefore, lane was included as a covariate in addition to sequencing run.
+
+```{r adonis_run, warning=FALSE, message=FALSE, eval=FALSE}
+#extract otus & meta for each subset --> used for adonis
+adon.reads.run = data.frame(otu_table(dipp.reps2.prop.s.runVlane), check.names=F)
+adon.meta.run = data.frame(sample_data(dipp.reps2.prop.s.runVlane))
+
+#adonis on run + lane, only lane + run samples
+##all run reps came from the same PCR reaction and extraction per sample
+##run reps were sequenced on different runs, and therefore also different lanes.
+##there's no way of avoiding this, so we'd expect R2 for lane to increase slightly
+adonis(adon.reads.run~illumina_lane+HS_run, data=adon.meta.run, method='bray', strata=adon.meta.run$sample_id)
+```
+
+```{r adonis_run2, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#This chunk stores the commands used to test adonis using other distance metrics and is not executed in this .Rmd
+UF.dist.run = phyloseq::distance(dipp.reps2.prop.s.runVlane, method='unifrac')
+WF.dist.run = phyloseq::distance(dipp.reps2.prop.s.runVlane, method='wunifrac')
+
+#adonis on lane, only lane samples
+##Jaccard distance
+adonis(adon.reads.run~HS_run, data=adon.meta.run, method='jaccard', strata=adon.meta.run$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.run~HS_run, data=adon.meta.run, strata=adon.meta.run$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.run~HS_run, data=adon.meta.run, strata=adon.meta.run$sample_id)
+```
+
+>*adonis PCR run*
+
+PCR run replicates were derived from the same DNA extract and were sequenced on the same lane of the same sequencing run, thus eliminating any effects of these technical aspects in this comparison.
+
+```{r adonis_pcr, warning=FALSE, message=FALSE, eval=FALSE}
+#extract otus & meta for each subset --> used for adonis
+adon.reads.pcrA = data.frame(otu_table(dipp.reps2.prop.s.pcrVrun), check.names=F)
+adon.meta.pcrA = data.frame(sample_data(dipp.reps2.prop.s.pcrVrun))
+#adon.reads.pcrB = data.frame(otu_table(dipp.reps2.prop.s.pcrVlane), check.names=F)
+#adon.meta.pcrB = data.frame(sample_data(dipp.reps2.prop.s.pcrVlane))
+##B is for looking at cummulative effects
+
+#adonis on run + lane + PCR, only lane + run + PCR samples
+##all PCR reps came from the same extraction per sample
+##PCR reps were sequenced on different runs from lane reps, and therefore also different lanes
+adonis(adon.reads.pcrA~PCR_run, data=adon.meta.pcrA, method='bray', strata=adon.meta.pcrA$sample_id)
+```
+
+```{r adonis_pcr2, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#This chunk stores the commands used to test adonis using other distance metrics and is not executed in this .Rmd
+UF.dist.pcr = phyloseq::distance(dipp.reps2.prop.s.pcrVrun, method='unifrac')
+WF.dist.pcr = phyloseq::distance(dipp.reps2.prop.s.pcrVrun, method='wunifrac')
+
+#adonis on lane, only lane samples
+##Jaccard distance
+adonis(adon.reads.pcrA~PCR_run, data=adon.meta.pcrA, method='jaccard', strata=adon.meta.pcrA$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.pcr~PCR_run, data=adon.meta.pcrA, strata=adon.meta.pcrA$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.pcr~PCR_run, data=adon.meta.pcrA, strata=adon.meta.pcrA$sample_id)
+```
+
+>*adonis extraction*
+
+All extraction replicates were derived from the same sample specimen, but DNA was extracted at different times. However, all DNA extracts were processed in the same PCR batch and were sequenced in the same lane of the same sequencing run, thus eliminating these effects from analyses.
+
+```{r adonis_extraction, warning=FALSE, message=FALSE, eval=FALSE}
+#extract otus & meta for each subset --> used for adonis
+adon.reads.extractionA = data.frame(otu_table(dipp.reps2.prop.s.extractVpcr), check.names=F)
+adon.meta.extractionA = data.frame(sample_data(dipp.reps2.prop.s.extractVpcr))
+#adon.reads.extractionB = data.frame(otu_table(dipp.reps2.prop.s.extractVlane), check.names=F)
+#adon.meta.extractionB = data.frame(sample_data(dipp.reps2.prop.s.extractVlane))
+##B is for looking at cummulative effects
+
+#adonis on run + lane + PCR + extraction, all samples
+adonis(adon.reads.extractionA~extraction_cycle, data=adon.meta.extractionA, method='bray', strata=adon.meta.extractionA$sample_id)
+```
+
+```{r adonis_extraction2, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#This chunk stores the commands used to test adonis using other distance metrics and is not executed in this .Rmd
+UF.dist.ext = phyloseq::distance(dipp.reps2.prop.s.extractVpcr, method='unifrac')
+WF.dist.ext = phyloseq::distance(dipp.reps2.prop.s.extractVpcr, method='wunifrac')
+
+#adonis on lane, only lane samples
+##Jaccard distance
+adonis(adon.reads.extractionA~extraction_cycle, data=adon.meta.extractionA, method='jaccard', strata=adon.meta.extractionA$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.ext~extraction_cycle, data=adon.meta.extractionA, strata=adon.meta.extractionA$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.ext~extraction_cycle, data=adon.meta.extractionA, strata=adon.meta.extractionA$sample_id)
+```
+
+|**adonis** *R2* | Bray | Jaccard | Unweighted Unifrac | Weighted Unifrac|
+|---|---|---|---|---|
+|**Lane** | 0.104% | 0.084% | 1.99% | 0.077%|
+|*p-value* | 0.001 | 0.001 | 0.001 | 0.001|
+|**Run** | 0.220% | 0.169% | 3.79% | 0.107%|
+|*p-value* | 0.001 | 0.001 | 0.001 | 0.001|
+|**PCR** | 1.34% | 1.28% | 4.04% | 1.04%|
+|*p-value* | 0.001 | 0.001 | 0.001 | 0.001|
+|**Extraction** | 7.24% | 5.86% | 2.55% | 12.0%|
+|*p-value* | 0.001 | 0.001 | 0.001 | 0.001|
+
+##Distance Statistics
+
+```{r calc_sumstats_dist_boxplot, echo=FALSE, warning=FALSE, message=FALSE, fig.width=15}
+####for future, write function to extract pairwise distance from distance matrices####
+#get dist matrix for all samples for each distance metric; NA out lower half of matrix (redundant)
+dist.Bray = phyloseq::distance(dipp.reps2.prop.s.turku, method='bray')
+dist.Bray.mat = as.matrix(dist.Bray)
+dist.Bray.mat[lower.tri(dist.Bray.mat)] <- NA
+dist.Jac = phyloseq::distance(dipp.reps2.prop.s.turku, method='jaccard')
+dist.Jac.mat = as.matrix(dist.Jac)
+dist.Jac.mat[lower.tri(dist.Jac.mat)] <- NA
+dist.UF = phyloseq::distance(dipp.reps2.prop.s.turku, method='unifrac')
+dist.UF.mat = as.matrix(dist.UF)
+dist.UF.mat[lower.tri(dist.UF.mat)] <- NA
+dist.WF = phyloseq::distance(dipp.reps2.prop.s.turku, method='wunifrac')
+dist.WF.mat = as.matrix(dist.WF)
+dist.WF.mat[lower.tri(dist.WF.mat)] <- NA
+
+#get melted data frame for each distance for all samples, remove NAs
+dist.Bray.m = melt(dist.Bray.mat)
+dist.Bray.m = dist.Bray.m[complete.cases(dist.Bray.m),]
+dist.Jac.m = melt(dist.Jac.mat)
+dist.Jac.m = dist.Jac.m[complete.cases(dist.Jac.m),]
+dist.UF.m = melt(dist.UF.mat)
+dist.UF.m = dist.UF.m[complete.cases(dist.UF.m),]
+dist.WF.m = melt(dist.WF.mat)
+dist.WF.m = dist.WF.m[complete.cases(dist.WF.m),]
+
+#add variable for distance method
+dist.Bray.m$method = as.factor("Bray")
+dist.Jac.m$method = as.factor("Jaccard")
+dist.UF.m$method = as.factor("Unweighted-Unifrac")
+dist.WF.m$method = as.factor("Weighted-Unifrac")
+
+#merge pair-wise distance for all methods
+dist.ALL.m = rbind(dist.Bray.m, dist.Jac.m, dist.UF.m, dist.WF.m)
+
+#add meta data
+reps.meta.turku = reps.meta[reps.meta$site == 'Turku',]
+rep.vars = c("sample_id", "HS_run", "illumina_lane", "TechRep_type", "extraction_cycle", "mask_id")
+reps.meta.turku.sub = reps.meta.turku[rep.vars]
+reps.meta.turku.sub$sequence_id = row.names(reps.meta.turku.sub)
+#add meta data for first sample in pair
+dist.ALL.m.meta = merge(dist.ALL.m, reps.meta.turku.sub, by.x=c("Var1"), by.y=c("sequence_id"))
+#adjust column names
+names(dist.ALL.m.meta) = c("Sample1", "Sample2", "dist", "method", "sample_id1", "HS_run1", "illumina_lane1", "TechRep_type1", "extraction_cycle1", "mask_id1")
+#add meta data for second sample in pair
+dist.ALL.m.meta2 = merge(dist.ALL.m.meta, reps.meta.turku.sub, by.x=c("Sample2"), by.y=c("sequence_id"))
+#adjust column nammes
+names(dist.ALL.m.meta2)[11:16] = paste(names(dist.ALL.m.meta2)[11:16], "2", sep='')
+#add logical for same samples
+dist.ALL.m.meta2$samePoint = dist.ALL.m.meta2$Sample1 ==  dist.ALL.m.meta2$Sample2
+dist.ALL.m.meta2$pair = dist.ALL.m.meta2$sample_id1 ==  dist.ALL.m.meta2$sample_id2
+dist.ALL.m.meta2$sameSubject = dist.ALL.m.meta2$mask_id1 == dist.ALL.m.meta2$mask_id2
+#extract only sample comparisons, excluding same sample comparison
+dist.PAIRS = dist.ALL.m.meta2[which(dist.ALL.m.meta2$samePoint == FALSE & dist.ALL.m.meta2$pair == TRUE),]
+dist.nonPAIRS = dist.ALL.m.meta2[which(dist.ALL.m.meta2$samePoint == FALSE & dist.ALL.m.meta2$pair == FALSE),]
+dist.nonPAIRS$comparison_group[dist.nonPAIRS$sameSubject == TRUE] <- 'WithinSubject'
+dist.nonPAIRS$comparison_group[dist.nonPAIRS$sameSubject == FALSE] <- 'BetweenSubject'
+dist.nonPAIRS$comparison_group = factor(dist.nonPAIRS$comparison_group, levels=c('WithinSubject','BetweenSubject'))
+
+#get subsets of meaningful comparisons between techreps & calc summary stats
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'lane'] <- 'lane'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'run'] <- 'run'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'run' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'pcr' & dist.PAIRS$TechRep_type2 == 'run'] <- 'pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'pcr' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'extraction' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'extraction'
+#pull comparison just for 4 primary tech rep comparisons
+dist.PAIRS.4TR = dist.PAIRS[complete.cases(dist.PAIRS),]
+dist.PAIRS.4TR$comparison_group = factor(dist.PAIRS.4TR$comparison_group, levels=c('lane', 'run', 'pcr', 'extraction'))
+#....continuing assigning variable for other comparion_group combinations
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'lane2extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'lane2pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'run' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'run2extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'extraction' & dist.PAIRS$TechRep_type2 == 'run'] <- 'run2extraction'
+#convert comparison_group to factor and relevel
+dist.PAIRS$comparison_group = factor(dist.PAIRS$comparison_group, levels=c('lane', 'run', 'lane2pcr', 'pcr', 'extraction', 'run2extraction', 'lane2extraction'))
+
+#combine distPAIRS & dist.nonPAIRS
+dist.ALL = rbind(dist.PAIRS, dist.nonPAIRS)
+dist.4TR.ALL = rbind(dist.PAIRS.4TR, dist.nonPAIRS)
+
+#plots
+p1 = ggplot(dist.ALL, aes(comparison_group, dist, color=comparison_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~method)
+#used in NIST poster
+ggplot(dist.4TR.ALL, aes(comparison_group, dist, color=comparison_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~method, nrow=1) + 
+  xlab(NULL) + 
+  ylab('Distance/Dissimilarity Value') + 
+  scale_y_continuous(breaks=seq(0,1, .2), labels=seq(0,1, .2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_manual(values= fresh_swap)
+
+#Run Kruskal-Wallis test to detect significant differences in distance between the comparison_group
+#require(PMCMR)
+#posthoc.kruskal.nemenyi.test(dist.4TR.ALL[dist.4TR.ALL$method == 'Bray',]$dist, dist.4TR.ALL[dist.4TR.ALL$method == 'Bray',]$comparison_group, "Chisq")
+#posthoc.kruskal.nemenyi.test(dist.4TR.ALL[dist.4TR.ALL$method == 'Jaccard',]$dist, dist.4TR.ALL[dist.4TR.ALL$method == 'Jaccard',]$comparison_group, "Chisq")
+#...
+```
+
+The distance/dissimiliarity metrics calculated for were plotted for each type of technical replicate considered. It is obvious that the distance/dissimilarity between lane, run and PCR technical replicates is quite small compared to that between different samples from the same subject ('WithinSubject' or intra-subject variation) and that between samples from different subjects ('BetweenSubject' or inter-subject variation). Likewise, the distance/dissimlarity between extraction replicates was much smaller than WithinSubject and BetweenSubjects samples, although the magnitude of this difference is less than that observed with lane, run and PCR technical replicates. These observations were statistically significant across all dissimilarity/distance metrics used. 
+
+Although, these effects were not as striking when Unweighted-Unifrac distances were used; recall, this is a phylogenetic presence/absence measurement, and this result could indicate a few things: 1) presence/absence differences within and between subjects is expected to be minimized - these samples are of the same specimen type (stool) and from subjects of a similar age and demographic; 2) presence/absence are highly influenced by samples that are included on the same lane. The latter would indicate the presence of batch effects, though it should be somewhat reassuring that biological variation still mostly exceeds (at least for lane and extraction replicates) technical variation. In the following section, we will see that this is mostly contributed by low-abundant taxa. So these presence/absence technical effects can be removed from analysis. 
+
+The result that dissimilarity/distance between biological samples exceeds that of technical replicat es indicates that while technical processes do have an effect on the microbial variation detected, the effect of biological covariates exceeds that effect and should be detectable. A summary of the results of applying pairwise-posthoc Kruskal-Nemenyi test to detect statistical significane between technical and biological replicates is summarized in the table below; p-values are presented in the order Bray:Jaccard:Unweighted-Unifrac:Weighted-Unifrac. 
+
+|*p*-value | **lane** | **run** | 
+|---|---|---|
+|**run**| 1.00:1.00:**<0.001**:1.00 | - | 
+|**PCR**| 1.00:1.00:0.101:1.00 | 1.00:1.00:0.739:1.00 |
+|**extraction**| 0.30:0.30:0.989:**<0.001** | 0.42:0.42:**0.013:<0.001** | 
+|**WithinSubject**| **<0.001:<0.001:<0.001:<0.001** | **<0.001:<0.001**:0.148:**<0.001 **| 
+|**BetweenSubject**| **<0.001:<0.001:<0.001:<0.001** | **<0.001:<0.001:<0.001:<0.001** | 
+
+|*p*-value | **PCR** | **extraction** |
+|---|---|---|---|
+|**run**| - | - |
+|**PCR**| - | - |
+|**extraction**|  0.70:0.70:0.723:0.13 | - |
+|**WithinSubject**| **<0.001:<0.001**:0.056:**<0.001** | **<0.001:<0.001:<0.001**:0.123 |
+|**BetweenSubject**|  **<0.001:<0.001:0.003:<0.001** | **<0.001:<0.001:<0.001:0.001** | 
+
+|*p*-value |**WithinSubject** |
+|---|---|
+|**BetweenSubject**| **<0.001:<0.001:<0.001:<0.001** |
+
+```{r dist_stats_complete, echo=FALSE, eval=FALSE, warning=FALSE, message=FALSE}
+#This table gets cut when Rmd is knit, so complete version is included here
+|*p*-value | **lane** | **run** | **PCR** | **extraction** | **WithinSubject** |
+|---|---|---|---|---|---|
+|**run**| 1.00:1.00:**<0.001**:1.00 | - | - | - | - |
+|**PCR**| 1.00:1.00:0.101:1.00 | 1.00:1.00:0.739:1.00 | - | - | - |
+|**extraction**| 0.30:0.30:0.989:**<0.001** | 0.42:0.42:**0.013:<0.001** | 0.70:0.70:0.723:0.13 | - | - | 
+|**WithinSubject**| **<0.001:<0.001:<0.001:<0.001** | **<0.001:<0.001**:0.148:**<0.001 **| **<0.001:<0.001**:0.056:**<0.001** | **<0.001:<0.001:<0.001**:0.123 | - |
+|**BetweenSubject**| **<0.001:<0.001:<0.001:<0.001** | **<0.001:<0.001:<0.001:<0.001** | **<0.001:<0.001:0.003:<0.001** | **<0.001:<0.001:<0.001:0.001** | **<0.001:<0.001:<0.001:<0.001** |
+```
+
+--- 
+
+#Estimating the Limit of Quantification
+
+##Evaluating taxa variance across technical replicates
+
+> Technical processes have a larger effect on low abundant taxa.
+
+Because variance is a function of the mean, coefficient of variance (```stdev/mean```) is calculated as it normalizes variance to the mean. Coefficient of variance for each taxa across all technical replicates was calculated. Coefficient of variance is greatest among taxa whose average relative abundance is <0.01% and decreases as average relative abundance increases. That is taxa with an average relative abundance >5% have the lowest coefficient of variance and are thus less sensitive to errors introduced in technical processes of data generation. 
+
+```{r species_var, warning=FALSE, message=FALSE, echo=FALSE}
+#make subsets of relevant comparisons
+reps.lane = dipp.reps.m[dipp.reps.m$TechRep_type == 'lane',]
+run.samps = unique(dipp.reps.m[dipp.reps.m$TechRep_type == 'run',]$sample_id)
+reps.run = subset(dipp.reps.m, TechRep_type == 'run' | 
+                    TechRep_type == 'lane' & sample_id %in% run.samps)
+reps.pcr = subset(dipp.reps.m, TechRep_type == 'run' | TechRep_type == 'pcr')
+reps.extraction = subset(dipp.reps.m, TechRep_type == 'run' | 
+                           TechRep_type == 'pcr' | TechRep_type == 'extraction')
+```
+
+```{r cv_dataframe, echo=FALSE, message=FALSE, warning=FALSE, fig.width=15}
+###LANE###
+#extract lane reps for each sample and Species
+reps.lane = dipp.reps.m[dipp.reps.m$TechRep_type == 'lane',]
+#calc summary stats for each sample
+reps.lane.stat = ddply(reps.lane,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance),
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+#calc mean & CV across all samples for each Species
+lane.cv = ddply(reps.lane.stat, ~Species, function(x) c(mean = mean(x$avg), cv = sd(x$avg)/mean(x$avg)))
+lane.cv$RepType = 'lane'
+
+###RUN###
+#extract run reps
+#get sample_ids for lane reps in that also have run reps
+run.samps = unique(dipp.reps.m[dipp.reps.m$TechRep_type == 'run',]$sample_id)
+#extract mean for lane reps
+reps.lane2 = subset(reps.lane.stat, reps.lane.stat$sample_id %in% run.samps)
+reps.lane2$RepType = 'lane'
+reps.lane3 = data.frame(sample_id=reps.lane2$sample_id, 
+                        Species = reps.lane2$Species, 
+                        avg = reps.lane2$avg, 
+                        RepType = reps.lane2$RepType)
+reps.run = subset(dipp.reps.m, TechRep_type == 'run')
+#pull just abundance, species, and sample_ids
+reps.run2 = ddply(reps.run, ~sample_id+Species, function(x) c(avg= mean(x$Abundance)))
+reps.run2$RepType = 'run'
+#merge reps.lane3 & reps.run2
+run.reps.stat = rbind(reps.lane3, reps.run2)
+run.cv = ddply(run.reps.stat, ~Species, function(x) c(mean=mean(x$avg), 
+                                                             cv = sd(x$avg)/mean(x$avg)))
+run.cv$RepType = 'run'
+
+###PCR###
+reps.pcr = subset(dipp.reps.m, TechRep_type == 'run' | TechRep_type == 'pcr')
+pcr.cv = ddply(reps.pcr,
+                       ~Species, 
+                       function(x) c(mean = mean(x$Abundance), 
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+pcr.cv$RepType = as.factor('pcr')
+
+###EXTRACTION###
+reps.extraction = subset(dipp.reps.m, TechRep_type == 'pcr' | TechRep_type == 'extraction')
+extraction.cv = ddply(reps.extraction,
+                       ~Species, 
+                       function(x) c(mean = mean(x$Abundance), 
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+extraction.cv$RepType = as.factor('extraction')
+
+####COMBINE REPTYPES####
+ALL.cv = rbind(lane.cv, run.cv, pcr.cv, extraction.cv)
+ALL.cv$RepType = factor(ALL.cv$RepType, levels=c('lane', 'run', 'pcr', 'extraction'))
+#add abundance group variable
+ALL.cv$abund_group[ALL.cv$mean <= 0.0001] <- "<0.01%"
+ALL.cv$abund_group[ALL.cv$mean > 0.0001 & ALL.cv$mean <= 0.001] <- "0.01% to 0.1%"
+ALL.cv$abund_group[ALL.cv$mean > 0.001 & ALL.cv$mean <= 0.01] <- "0.1% to 1%"
+ALL.cv$abund_group[ALL.cv$mean > 0.01 & ALL.cv$mean <= 0.05] <- "1% to 5%"
+ALL.cv$abund_group[ALL.cv$mean > 0.05] <- ">5%"
+ALL.cv$abund_group = factor(ALL.cv$abund_group, levels=c("<0.01%", "0.01% to 0.1%", "0.1% to 1%", "1% to 5%", ">5%"))
+#remove Species with mean = 0
+ALL.cv0 = subset(ALL.cv, mean > 0)
+
+ALL.cv0.bar = ddply(ALL.cv0, ~abund_group+RepType, function(x) c(mean=mean(x$cv), sd = sd(x$cv), se = sd(x$cv)/sqrt(nrow(x))))
+
+#Add alpha variable for facet plotting
+ALL.cv0$alpha.lane = ifelse(ALL.cv0$RepType == 'lane', 1, 0.3)
+ALL.cv0$alpha.run = ifelse(ALL.cv0$RepType == 'run', 1, 0.3)
+ALL.cv0$alpha.pcr = ifelse(ALL.cv0$RepType == 'pcr', 1, 0.3)
+ALL.cv0$alpha.ext = ifelse(ALL.cv0$RepType == 'extraction', 1, 0.3)
+
+ 
+
+#plots
+##point
+p1 = ggplot(ALL.cv0, aes(mean, cv, color=RepType)) +
+  geom_point(aes(alpha=alpha.lane)) + 
+  scale_x_log10() +
+  scale_y_log10() +
+  ylim(0,10)
+##bar
+ggplot(ALL.cv0.bar, aes(RepType, mean, fill=RepType)) +
+  geom_bar(stat='identity') + 
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=0.2) +
+  facet_wrap(~abund_group, nrow=1) +
+  ylab('Average Coefficient of Variance') + 
+  xlab('Technical Replicate Type') +
+  guides(fill=guide_legend(title="Technical Replicate\nType")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values=fresh_swap)
+
+```
+
+Average coefficient of variance between technical replicates for each taxa; error bars represent standard errors.
+
+
+###Previous approach - using variance only as a threshold for selecting taxa
+
+Calculate mean, median, standard deviation, and variance for each replicate for each species. The commands are hidden in this document for aesthetic reasons but can be found in the .Rmd file. Also, these calculations take several minutes to run, so the output has been provided as ```dipp.rep.stats.csv``` for convenience.
+
+```{r species_var2, warning=FALSE, message=FALSE, eval=FALSE, echo=FALSE}
+#these commands take several minutes to calculate
+#they are saved and imported for convenience
+reps.lane.stat = ddply(reps.lane,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance),
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+reps.lane.stat$RepType = as.factor('lane')
+#This is often a 1:4 run:lane replicate comparison, 
+#so that the variance attributed to run does not equally contribute to that of lane
+#should compare median abundance for lane reps (1 value) to run
+reps.run.stat = ddply(reps.run,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance)))
+reps.run.stat$RepType = as.factor('run')
+reps.pcr.stat = ddply(reps.pcr,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance)))
+reps.pcr.stat$RepType = as.factor('pcr')
+reps.extraction.stat = ddply(reps.extraction,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance)))
+reps.extraction.stat$RepType = as.factor('extraction')
+
+rep.stats = rbind(reps.lane.stat, reps.run.stat)
+rep.stats = rbind(rep.stats, reps.pcr.stat)
+rep.stats = rbind(rep.stats, reps.extraction.stat)
+
+write.csv(rep.stats, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.rep.stats.csv')
+```
+
+
+```{r rep.stats_import, echo=FALSE, warning=FALSE, message=FALSE}
+rep.stats = read.csv('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.rep.stats.csv', check.names=F)
+```
+
+>Overall, within replicates, variance is small. This is reassuring that while technical and processing variation is present, it is not very large. Additionally, variance may serve as a useful value in determining OTU filtering parameters.
+
+>Variance within replicates rarely exceeds 1e-5 for any given species. Therefore, a variance threshold of 1e-5 would be a justified cutoff for OTU selection. That is, if a given OTU's variance across all samples does not exceed 1e-5, then the variance observed is expected solely due to the fact that samples were processed in different batches. OTUs with a variance that exceeds 1e-5 would have additional sources of variation (i.e. biological sources) beyond that expected from technical variation alone.
+
+>**DISADVANTAGES:** 
+
+This approach does no consider the fact that variance is a function of the mean, and that this approach is not sensitive to the fact that lower abundant taxa will thus have a lower variance. Taxa with a lower variance could therefore be removed from further analysis with the assumption that their variance does not exceed that expected to technical processes. This is an invalid assumption, which can be remedied by using coefficient of variance as described in the section above.
+
+This plots below represent the variance for each taxa across the different technical replicate types used.
+
+```{r repstats_plot2, warning=FALSE, message=FALSE, echo=FALSE, fig.width=10}
+p1 = ggplot(rep.stats, aes(RepType, var)) + 
+  geom_boxplot() +
+  scale_y_log10() + 
+  geom_hline(yintercept=1e-5, color='blue', lty='dashed') +
+  xlab('Source of variation') + 
+  ylab('Variance')
+
+p2 = ggplot(rep.stats, aes(var, color=RepType)) +
+  geom_density() +
+  scale_x_log10() + 
+  geom_vline(xintercept=1e-5, color='blue', lty='dashed') + 
+  xlab('Variance within replicates')
+
+grid.arrange(p1, p2, nrow=1)
+```
+
+This plot shows the linear relationship between the mean and the average for each taxa across all technical replicates. Selecting taxa based on differences in variance alone will thus be biased towards more abundant taxa.
+
+```{r repstats_plot3, warning=FALSE, message=FALSE, echo=FALSE}
+#playing around with different visualizations
+ggplot(rep.stats, aes(avg, var, color=RepType)) + 
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_wrap(~RepType) +
+  geom_abline(intercept=0, slope=1, lty='dashed', size=3, color='#666666') +
+  geom_hline(yintercept = 1e-5, color='blue', lty='dashed') +
+  geom_vline(xintercept=0.001, lty='dashed', color='blue')
+```
+
+```{r lane_plots, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+lane.stats = rep.stats[rep.stats$RepType == "lane",]
+
+ggplot(lane.stats, aes(avg, var)) + 
+  geom_point() +
+  scale_x_log10() +
+  scale_y_log10() + 
+  facet_wrap(~sample_id) +
+  geom_abline(intercept=0, slope=1, lty='dashed', size=3, color='#666666') +
+  geom_hline(yintercept = 1e-5, color='blue', lty='dashed') +
+  geom_vline(xintercept=0.001, lty='dashed', color='blue')
+
+
+```
+
+---
+
+##Limit of Quantification
+
+Based on the results above, we expect the variance observed between biological samples for each taxa to exceed the variance calculated for each taxa between technical replicates. Therefore, in this section we calculate the ratio between technical and bioloigcal variance for each taxa. When the ratio of the coefficient of variance for biological samples to technical replicates is ~1, biological variance cannot be discerned from technical variance; thus these taxa should not be considered when intepretting results that compare biological samples. However, taxa with a ratio >1 have variance which exceeds that expected to be contributed by technical processes and can be investigated for biological differences.
+
+By setting the CV ratio threshold to 2.25, taxa can be filtered to only include OTUs from genera that have a coefficient of variance between biological samples that exceeds that observed between technical replicates. Filtering in this manner results in a dataset that includeds 172 genera which correpsonds to 519 species, or 11,583 OTUs. This data set is used in further statistical analyses which attempt to detect differences between biological covariates of interest.
+
+This approach has several advantages:
+
+1. *more inclusive of low abundant taxa* Rather than excluding taxa below some threshold (i.e. >0.1%), this approach would allow for low abundant taxa to be retained so long as the variance of that taxa across biological samples is not similar to the variance of that taxa across technical replicates. For example, several species of Firmicutes are thought to be beneficial but typically comprise a low relative abundance (usually ~0.1%). This approach is less likely to exclude taxa with a similar scenario.
+2. *reduces the number of features to consider* this approach reduces the number of OTUs to consider (49,445 to 11,583) and corresponds to a number of species which is more similar to the number of species thought to colonize the gut (~500). Below is a table comparing the number of features at various classification levels before and after applying this filtering approach:
+
+|Level|Raw counts|Filtered by CV ratio|
+|---|---|---|
+|Phylum|87|12|
+|Family|492|91|
+|Genus|1,376|172
+|Species|2,100|519|
+|OTU|49,445|11,583|
+
+
+```{r quant_test, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
+#This chunk is not being executed, as it takes several minutes to run 
+#--> output is sourced in the following chunk
+
+#load phyloseq object; samples with <20K reads, collected after 24 months of age and from subjects with only 1 autoAb have been removed --> 49,445 OTUs
+load('~/Desktop/D3C/D3C_2.0/1_inputs/input_files/dipp.sam3.noS.Rdata')
+
+#select only samples from Turku
+dipp.sam3.noS.Turku = subset_samples(dipp.sam3.noS, site == 'Turku')
+#remove taxa with no reads --> removes ~1000 OTUs --> 2062 unique species names
+dipp.sam3.noS.Turku2 = filter_taxa(dipp.sam3.noS.Turku, function(x) sum(x) >= 1, TRUE)
+#compress OTUs to Species names --> 2,062 species or 1356 genera
+dipp.sam3.noS.Turku2.g = tax_glom(dipp.sam3.noS.Turku2, 'Genus')
+#glom takes several minutes to run --> exported and provided for sourced for convenience, if needed later
+#save(dipp.sam3.noS.Turku2.g, file = '~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.noS.Turku2.g.Rdata')
+
+#transform sample counts to proportions
+dipp.sam3.noS.Turku2.g.prop = transform_sample_counts(dipp.sam3.noS.Turku2.g, function(x) x/sum(x))
+
+#split samples by tech reps or not
+dipp.sam3.noS.Treps = subset_samples(dipp.sam3.noS.Turku2.g.prop, TechReps==TRUE)
+dipp.sam3.noS.Treps = subset_samples(dipp.sam3.noS.Treps, TechRep_type != 'reseq')
+dipp.sam3.noS.Tnotreps = subset_samples(dipp.sam3.noS.Turku2.g.prop, TechReps==FALSE)
+
+#melt data subsets; this also takes a few minutes to run
+dipp.sam3.noS.Treps.m = psmelt(dipp.sam3.noS.Treps)
+dipp.sam3.noS.Tnotreps.m = psmelt(dipp.sam3.noS.Tnotreps)
+
+#calculate coefficient of variance for each genus
+Tnotreps.CV = ddply(dipp.sam3.noS.Tnotreps.m, ~Genus, 
+                    function(x) c(summary(x$Abundance),
+                                  Var = var(x$Abundance),
+                                  CV = sd(x$Abundance)/mean(x$Abundance)))
+Treps1.CV = ddply(dipp.sam3.noS.Treps.m, ~Genus+sample_id, 
+                    function(x) c(summary(x$Abundance),
+                                  Var = var(x$Abundance),
+                                  CV = sd(x$Abundance)/mean(x$Abundance)))
+Treps.CV = ddply(Treps1.CV, ~Genus, 
+                 function(x) c(summary(x$Mean), 
+                               Var = var(x$Mean),
+                               CV = mean(x$CV)))
+
+#combine CV calculations
+T.allreps.CV = merge(Tnotreps.CV, Treps.CV, by='Genus')
+#remove taxa without a CV value --> went from 1,356 genera to 237 genera
+T.allreps.CV.complete = T.allreps.CV[complete.cases(T.allreps.CV),]
+#calculate CV ratio (biological/technical)
+T.allreps.CV.complete$CVratio = T.allreps.CV.complete$CV.x/T.allreps.CV.complete$CV.y
+
+#generating T.all.reps.CV.complete takes several (>30 minutes...at least running on MacBookPro)
+##dataframe is exported and sourced for easier execution of Rmd
+write.csv(T.allreps.CV.complete, file = '~/Desktop/D3C/D3C_2.0/Supplement/TechReps/T.allreps.CV.complete.csv')
+```
+
+```{r OTU_filt_plot, echo=FALSE, message=FALSE, warning=FALSE}
+T.allreps.CV.complete = read.csv('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/T.allreps.CV.complete.csv', row.names=1, check.names=FALSE)
+
+#plot
+ggplot(T.allreps.CV.complete, aes(CVratio, 100*Mean.x)) +
+  geom_point(aes(size=1, color=log10(CVratio))) +
+  scale_x_log10(breaks=c(1, 5, 10, 50)) +
+  scale_y_log10(breaks=c(0.001, 0.01, 0.1, 1, 10), labels=c(0.001, 0.01, 0.1, 1, 10)) +
+  ylab('Average Relative Abundance (%)') +
+  xlab('Ratio of coefficient of variance (biological/technical)') +
+  geom_vline(xintercept=1) +
+  geom_vline(xintercept=2.25, lty='dashed') 
+
+#Subset based on CV ratio threshold
+T.allreps.CV.over2 = T.allreps.CV.complete[T.allreps.CV.complete$CVratio >= 2.25,]
+#172 genera --> 519 species
+T.allreps.CV.under2 = T.allreps.CV.complete[T.allreps.CV.complete$CVratio < 2.25,]
+#65 genera
+```
+
+```{r phyloseq_genfilt, echo=FALSE, warning=FALSE, message=FALSE, eval=FALSE}
+#This chunk subset the dipp.s
+#extract genus names
+gen.names = T.allreps.CV.over2$Genus
+#prune tax table
+tax.filt = as.matrix(subset(data.frame(tax_table(dipp.sam3.noS)), data.frame(tax_table(dipp.sam3.noS))$Genus %in% gen.names))
+#subset phyloseq object
+dipp.sam3.genfilt = phyloseq(otu_table(dipp.sam3.noS), sample_data(dipp.sam3.noS), tax_table(tax.filt))
+save(dipp.sam3.genfilt, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.Rdata')
+
+#generate agglomerated phylseq & save
+dipp.sam3.genfilt.p = tax_glom(dipp.sam3.genfilt, taxrank='Phylum')
+save(dipp.sam3.genfilt.p, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.p.Rdata')
+dipp.sam3.genfilt.f = tax_glom(dipp.sam3.genfilt, taxrank='Family')
+save(dipp.sam3.genfilt.f, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.f.Rdata')
+dipp.sam3.genfilt.g = tax_glom(dipp.sam3.genfilt, taxrank='Genus')
+save(dipp.sam3.genfilt.g, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.g.Rdata')
+dipp.sam3.genfilt.s = tax_glom(dipp.sam3.genfilt, taxrank='Species')
+save(dipp.sam3.genfilt.s, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.s.Rdata')
+```
+
+---
+
+##Reapplying PERMANOVA & CV Analysis to Filtered Taxa
+
+```{r, load_data2, eval=FALSE}
+#ordination and CV analysis performed on raw count data collapses at the species level
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.sam3.genfilt.s.Rdata')
+dipp.sam3.genfilt.s
+
+#Select TechReps samples
+filt.reps = subset_samples(dipp.sam3.genfilt.s, TechReps == 'TRUE')
+#remove reps due to reseuencing (at least 1 rep is 'defective...that's why it was resequenced)
+filt.reps = subset_samples(filt.reps, TechRep_type != 'reseq')
+#remove reps with <20,000 reads (being consistent with previous sample filtering parameters)
+filt.reps2 = prune_samples(sample_sums(filt.reps) >= 20000, filt.reps)
+#extract metadata
+filtreps.meta = data.frame(sample_data(filt.reps2))
+
+#add tree
+filt.reps2.tree = merge_phyloseq(filt.reps2, gg_tree)
+#removes OTUs with 0 counts
+filt.reps3.tree = filter_taxa(filt.reps2.tree, function(x) sum(x) >= 1, TRUE)
+
+```
+
+###PERMANOVA
+
+```{r calc_oridnation2, warning=FALSE, message=FALSE, echo=FALSE, eval=FALSE}
+#calculate NMDS-Bray ordination
+filt.reps.ord = ordinate(filt.reps2, 'NMDS', 'bray')
+
+#calculate NMDS Jaccard ordination
+filt.reps.jac = ordinate(filt.reps2, 'NMDS', 'jaccard')
+
+#calculate Unweighted Unifrac PCoA ordination
+filt.reps.UUF = ordinate(filt.reps3.tree, "PCoA", "unifrac", weighted=FALSE)
+
+#calculate Weighted Unifrac PCoA ordination
+filt.reps.WUF = ordinate(filt.reps3.tree, "PCoA", "unifrac", weighted=TRUE)
+
+#Save ordination calculations
+save(filt.reps3.tree, file = '~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.tree.Rdata')
+save(filt.reps.ord, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.ord.Rdata')
+save(filt.reps.jac, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.jac.Rdata')
+save(filt.reps.UUF, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.UUF.Rdata')
+save(filt.reps.WUF, file='~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.WUF.Rdata')
+```
+
+```{r load_ord2, message=FALSE, warning=FALSE}
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.tree.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.ord.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.jac.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.UUF.Rdata')
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/sfilt.reps.WUF.Rdata')
+```
+
+```{r species, warning=FALSE, message=FALSE, eval=FALSE}
+#load original species prop table
+load('~/Desktop/D3C/D3C_2.0/Supplement/TechReps/dipp.reps2.prop.s.Rdata')
+#extract species that passed filtering parameters
+filt.s.names = taxa_names(filt.reps2)
+filt.reps.prop.s = subset_taxa(dipp.reps2.prop.s, taxa_names(dipp.reps2.prop.s) %in% filt.s.names)
+#melt phyloseq object 
+filt.reps.m = psmelt(filt.reps.prop.s)
+
+#Add phylogenetic tree
+filt.reps.prop.s.tree = merge_phyloseq(filt.reps.prop.s, gg_tree)
+
+#subset phyloseq object based on rep type
+filt.reps.prop.s.turku = subset_samples(filt.reps.prop.s.tree, site == 'Turku')
+filt.reps2.prop.s.extractionA = subset_samples(filt.reps.prop.s.turku, TechRep_type == 'extraction')
+filt.reps2.prop.s.pcrA = subset_samples(filt.reps.prop.s.turku, TechRep_type == 'pcr')
+filt.reps2.prop.s.runA = subset_samples(filt.reps.prop.s.turku, TechRep_type == 'run')
+filt.reps2.prop.s.lane = subset_samples(filt.reps.prop.s.turku, TechRep_type == 'lane')
+
+##excluding lane reps not present in other rep types
+filtsamp30 = unique(get_variable(filt.reps2.prop.s.runA, 'sample_id'))
+filt.reps2.prop.s.laneA = subset_samples(filt.reps2.prop.s.lane, sample_id %in% filtsamp30)
+filt.reps2.prop.s.runVlane = merge_phyloseq(filt.reps2.prop.s.laneA, filt.reps2.prop.s.runA)
+filt.reps2.prop.s.pcrVrun = merge_phyloseq(filt.reps2.prop.s.pcrA, filt.reps2.prop.s.runA)
+filt.reps2.prop.s.pcrVlane = merge_phyloseq(filt.reps2.prop.s.pcrA, filt.reps2.prop.s.laneA)
+filt.reps2.prop.s.extractVpcr = merge_phyloseq(filt.reps2.prop.s.extractionA, filt.reps2.prop.s.pcrA)
+filt.reps2.prop.s.extractVlane = merge_phyloseq(filt.reps2.prop.s.extractionA, filt.reps2.prop.s.laneA)
+```
+
+```{r adonis_filt_lane, message=FALSE, warning=FALSE}
+#LANE
+#extract otus & meta for each subset --> used for adonis
+adon.reads.lane = data.frame(otu_table(filt.reps2.prop.s.lane), check.names=F)
+adon.meta.lane = data.frame(sample_data(filt.reps2.prop.s.lane))
+
+UF.dist.lane = phyloseq::distance(filt.reps2.prop.s.lane, method='unifrac')
+WF.dist.lane = phyloseq::distance(filt.reps2.prop.s.lane, method='wunifrac')
+
+#Bray
+adonis(adon.reads.lane~illumina_lane, data=adon.meta.lane, method='bray', strata=adon.meta.lane$sample_id)
+##Jaccard distance
+adonis(adon.reads.lane~illumina_lane, data=adon.meta.lane, method='jaccard', strata=adon.meta.lane$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.lane~illumina_lane, data=adon.meta.lane, strata=adon.meta.lane$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.lane~illumina_lane, data=adon.meta.lane, strata=adon.meta.lane$sample_id)
+```
+
+```{r adonis_filt_run, warning=FALSE, message=FALSE}
+#RUN
+adon.reads.run = data.frame(otu_table(filt.reps2.prop.s.runVlane), check.names=F)
+adon.meta.run = data.frame(sample_data(filt.reps2.prop.s.runVlane))
+
+UF.dist.run = phyloseq::distance(filt.reps2.prop.s.runVlane, method='unifrac')
+WF.dist.run = phyloseq::distance(filt.reps2.prop.s.runVlane, method='wunifrac')
+
+#Bray
+adonis(adon.reads.run~illumina_lane+HS_run, data=adon.meta.run, method='bray', strata=adon.meta.run$sample_id)
+##Jaccard distance
+adonis(adon.reads.run~HS_run, data=adon.meta.run, method='jaccard', strata=adon.meta.run$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.run~HS_run, data=adon.meta.run, strata=adon.meta.run$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.run~HS_run, data=adon.meta.run, strata=adon.meta.run$sample_id)
+```
+
+```{r adonis_filt_pcr, warning=FALSE, message=FALSE}
+#PCR
+adon.reads.pcrA = data.frame(otu_table(filt.reps2.prop.s.pcrVrun), check.names=F)
+adon.meta.pcrA = data.frame(sample_data(filt.reps2.prop.s.pcrVrun))
+
+UF.dist.pcr = phyloseq::distance(filt.reps2.prop.s.pcrVrun, method='unifrac')
+WF.dist.pcr = phyloseq::distance(filt.reps2.prop.s.pcrVrun, method='wunifrac')
+
+#Bray
+adonis(adon.reads.pcrA~PCR_run, data=adon.meta.pcrA, method='bray', strata=adon.meta.pcrA$sample_id)
+##Jaccard distance
+adonis(adon.reads.pcrA~PCR_run, data=adon.meta.pcrA, method='jaccard', strata=adon.meta.pcrA$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.pcr~PCR_run, data=adon.meta.pcrA, strata=adon.meta.pcrA$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.pcr~PCR_run, data=adon.meta.pcrA, strata=adon.meta.pcrA$sample_id)
+```
+
+```{r adonis_filt_extraction, warning=FALSE, message=FALSE}
+#EXTRACTION
+adon.reads.extractionA = data.frame(otu_table(filt.reps2.prop.s.extractVpcr), check.names=F)
+adon.meta.extractionA = data.frame(sample_data(filt.reps2.prop.s.extractVpcr))
+
+UF.dist.ext = phyloseq::distance(filt.reps2.prop.s.extractVpcr, method='unifrac')
+WF.dist.ext = phyloseq::distance(filt.reps2.prop.s.extractVpcr, method='wunifrac')
+
+#Bray
+adonis(adon.reads.extractionA~extraction_cycle, data=adon.meta.extractionA, method='bray', strata=adon.meta.extractionA$sample_id)
+##Jaccard distance
+adonis(adon.reads.extractionA~extraction_cycle, data=adon.meta.extractionA, method='jaccard', strata=adon.meta.extractionA$sample_id)
+##Unweighted Unifrac
+adonis(UF.dist.ext~extraction_cycle, data=adon.meta.extractionA, strata=adon.meta.extractionA$sample_id)
+##Weighted Unifrac
+adonis(WF.dist.ext~extraction_cycle, data=adon.meta.extractionA, strata=adon.meta.extractionA$sample_id)
+```
+
+###distance boxplots
+
+```{r FILT_calc_sumstats_dist_boxplot, echo=FALSE, warning=FALSE, message=FALSE, fig.width=15}
+####for future, write function to extract pairwise distance from distance matrices####
+#get dist matrix for all samples for each distance metric; NA out lower half of matrix (redundant)
+dist.Bray = phyloseq::distance(filt.reps.prop.s.turku, method='bray')
+dist.Bray.mat = as.matrix(dist.Bray)
+dist.Bray.mat[lower.tri(dist.Bray.mat)] <- NA
+dist.Jac = phyloseq::distance(filt.reps.prop.s.turku, method='jaccard')
+dist.Jac.mat = as.matrix(dist.Jac)
+dist.Jac.mat[lower.tri(dist.Jac.mat)] <- NA
+dist.UF = phyloseq::distance(filt.reps.prop.s.turku, method='unifrac')
+dist.UF.mat = as.matrix(dist.UF)
+dist.UF.mat[lower.tri(dist.UF.mat)] <- NA
+dist.WF = phyloseq::distance(filt.reps.prop.s.turku, method='wunifrac')
+dist.WF.mat = as.matrix(dist.WF)
+dist.WF.mat[lower.tri(dist.WF.mat)] <- NA
+
+#get melted data frame for each distance for all samples, remove NAs
+dist.Bray.m = melt(dist.Bray.mat)
+dist.Bray.m = dist.Bray.m[complete.cases(dist.Bray.m),]
+dist.Jac.m = melt(dist.Jac.mat)
+dist.Jac.m = dist.Jac.m[complete.cases(dist.Jac.m),]
+dist.UF.m = melt(dist.UF.mat)
+dist.UF.m = dist.UF.m[complete.cases(dist.UF.m),]
+dist.WF.m = melt(dist.WF.mat)
+dist.WF.m = dist.WF.m[complete.cases(dist.WF.m),]
+
+#add variable for distance method
+dist.Bray.m$method = as.factor("Bray")
+dist.Jac.m$method = as.factor("Jaccard")
+dist.UF.m$method = as.factor("Unweighted-Unifrac")
+dist.WF.m$method = as.factor("Weighted-Unifrac")
+
+#merge pair-wise distance for all methods
+dist.ALL.m = rbind(dist.Bray.m, dist.Jac.m, dist.UF.m, dist.WF.m)
+
+#add meta data
+reps.meta.turku = reps.meta[reps.meta$site == 'Turku',]
+rep.vars = c("sample_id", "HS_run", "illumina_lane", "TechRep_type", "extraction_cycle", "mask_id")
+reps.meta.turku.sub = reps.meta.turku[rep.vars]
+reps.meta.turku.sub$sequence_id = row.names(reps.meta.turku.sub)
+#add meta data for first sample in pair
+dist.ALL.m.meta = merge(dist.ALL.m, reps.meta.turku.sub, by.x=c("Var1"), by.y=c("sequence_id"))
+#adjust column names
+names(dist.ALL.m.meta) = c("Sample1", "Sample2", "dist", "method", "sample_id1", "HS_run1", "illumina_lane1", "TechRep_type1", "extraction_cycle1", "mask_id1")
+#add meta data for second sample in pair
+dist.ALL.m.meta2 = merge(dist.ALL.m.meta, reps.meta.turku.sub, by.x=c("Sample2"), by.y=c("sequence_id"))
+#adjust column nammes
+names(dist.ALL.m.meta2)[11:16] = paste(names(dist.ALL.m.meta2)[11:16], "2", sep='')
+#add logical for same samples
+dist.ALL.m.meta2$samePoint = dist.ALL.m.meta2$Sample1 ==  dist.ALL.m.meta2$Sample2
+dist.ALL.m.meta2$pair = dist.ALL.m.meta2$sample_id1 ==  dist.ALL.m.meta2$sample_id2
+dist.ALL.m.meta2$sameSubject = dist.ALL.m.meta2$mask_id1 == dist.ALL.m.meta2$mask_id2
+#extract only sample comparisons, excluding same sample comparison
+dist.PAIRS = dist.ALL.m.meta2[which(dist.ALL.m.meta2$samePoint == FALSE & dist.ALL.m.meta2$pair == TRUE),]
+dist.nonPAIRS = dist.ALL.m.meta2[which(dist.ALL.m.meta2$samePoint == FALSE & dist.ALL.m.meta2$pair == FALSE),]
+dist.nonPAIRS$comparison_group[dist.nonPAIRS$sameSubject == TRUE] <- 'WithinSubject'
+dist.nonPAIRS$comparison_group[dist.nonPAIRS$sameSubject == FALSE] <- 'BetweenSubject'
+dist.nonPAIRS$comparison_group = factor(dist.nonPAIRS$comparison_group, levels=c('WithinSubject','BetweenSubject'))
+
+#get subsets of meaningful comparisons between techreps & calc summary stats
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'lane'] <- 'lane'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'run'] <- 'run'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'run' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'pcr' & dist.PAIRS$TechRep_type2 == 'run'] <- 'pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'pcr' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'extraction' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'extraction'
+#pull comparison just for 4 primary tech rep comparisons
+dist.PAIRS.4TR = dist.PAIRS[complete.cases(dist.PAIRS),]
+dist.PAIRS.4TR$comparison_group = factor(dist.PAIRS.4TR$comparison_group, levels=c('lane', 'run', 'pcr', 'extraction'))
+#....continuing assigning variable for other comparion_group combinations
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'lane2extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'lane' & dist.PAIRS$TechRep_type2 == 'pcr'] <- 'lane2pcr'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'run' & dist.PAIRS$TechRep_type2 == 'extraction'] <- 'run2extraction'
+dist.PAIRS$comparison_group[dist.PAIRS$TechRep_type1 == 'extraction' & dist.PAIRS$TechRep_type2 == 'run'] <- 'run2extraction'
+#convert comparison_group to factor and relevel
+dist.PAIRS$comparison_group = factor(dist.PAIRS$comparison_group, levels=c('lane', 'run', 'lane2pcr', 'pcr', 'extraction', 'run2extraction', 'lane2extraction'))
+
+#combine distPAIRS & dist.nonPAIRS
+dist.ALL = rbind(dist.PAIRS, dist.nonPAIRS)
+dist.4TR.ALL = rbind(dist.PAIRS.4TR, dist.nonPAIRS)
+
+#plots
+p1 = ggplot(dist.ALL, aes(comparison_group, dist, color=comparison_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~method)
+#used in NIST poster
+ggplot(dist.4TR.ALL, aes(comparison_group, dist, color=comparison_group)) + 
+  geom_boxplot() + 
+  facet_wrap(~method, nrow=1) + 
+  xlab(NULL) + 
+  ylab('Distance/Dissimilarity Value') + 
+  scale_y_continuous(breaks=seq(0,1, .2), labels=seq(0,1, .2)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_color_manual(values= fresh_swap)
+
+```
+
+###CV barplots
+
+```{r FILT_species_var, warning=FALSE, message=FALSE, echo=FALSE}
+#make subsets of relevant comparisons
+reps.lane = filt.reps.m[filt.reps.m$TechRep_type == 'lane',]
+run.samps = unique(filt.reps.m[filt.reps.m$TechRep_type == 'run',]$sample_id)
+reps.run = subset(filt.reps.m, TechRep_type == 'run' | 
+                    TechRep_type == 'lane' & sample_id %in% run.samps)
+reps.pcr = subset(filt.reps.m, TechRep_type == 'run' | TechRep_type == 'pcr')
+reps.extraction = subset(filt.reps.m, TechRep_type == 'run' | 
+                           TechRep_type == 'pcr' | TechRep_type == 'extraction')
+
+###LANE###
+#extract lane reps for each sample and Species
+#reps.lane = filt.reps.m[filt.reps.m$TechRep_type == 'lane',]
+#calc summary stats for each sample
+reps.lane.stat = ddply(reps.lane,
+                       ~sample_id+Species, 
+                       function(x) c(n=nrow(x), 
+                                     avg = mean(x$Abundance), 
+                                     med = median(x$Abundance), 
+                                     stdev = sd(x$Abundance), 
+                                     var = var(x$Abundance),
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+#calc mean & CV across all samples for each Species
+lane.cv = ddply(reps.lane.stat, ~Species, function(x) c(mean = mean(x$avg), cv = sd(x$avg)/mean(x$avg)))
+lane.cv$RepType = 'lane'
+
+###RUN###
+#extract run reps
+#get sample_ids for lane reps in that also have run reps
+#run.samps = unique(filt.reps.m[filt.reps.m$TechRep_type == 'run',]$sample_id)
+#extract mean for lane reps
+reps.lane2 = subset(reps.lane.stat, reps.lane.stat$sample_id %in% run.samps)
+reps.lane2$RepType = 'lane'
+reps.lane3 = data.frame(sample_id=reps.lane2$sample_id, 
+                        Species = reps.lane2$Species, 
+                        avg = reps.lane2$avg, 
+                        RepType = reps.lane2$RepType)
+#reps.run = subset(filt.reps.m, TechRep_type == 'run')
+#pull just abundance, species, and sample_ids
+reps.run2 = ddply(reps.run, ~sample_id+Species, function(x) c(avg= mean(x$Abundance)))
+reps.run2$RepType = 'run'
+#merge reps.lane3 & reps.run2
+run.reps.stat = rbind(reps.lane3, reps.run2)
+run.cv = ddply(run.reps.stat, ~Species, function(x) c(mean=mean(x$avg), 
+                                                             cv = sd(x$avg)/mean(x$avg)))
+run.cv$RepType = 'run'
+
+###PCR###
+#reps.pcr = subset(filt.reps.m, TechRep_type == 'run' | TechRep_type == 'pcr')
+pcr.cv = ddply(reps.pcr,
+                       ~Species, 
+                       function(x) c(mean = mean(x$Abundance), 
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+pcr.cv$RepType = as.factor('pcr')
+
+###EXTRACTION###
+#reps.extraction = subset(filt.reps.m, TechRep_type == 'pcr' | TechRep_type == 'extraction')
+extraction.cv = ddply(reps.extraction,
+                       ~Species, 
+                       function(x) c(mean = mean(x$Abundance), 
+                                     cv = sd(x$Abundance)/mean(x$Abundance)))
+extraction.cv$RepType = as.factor('extraction')
+
+####COMBINE REPTYPES####
+ALL.cv = rbind(lane.cv, run.cv, pcr.cv, extraction.cv)
+ALL.cv$RepType = factor(ALL.cv$RepType, levels=c('lane', 'run', 'pcr', 'extraction'))
+#add abundance group variable
+ALL.cv$abund_group[ALL.cv$mean <= 0.0001] <- "<0.01%"
+ALL.cv$abund_group[ALL.cv$mean > 0.0001 & ALL.cv$mean <= 0.001] <- "0.01% to 0.1%"
+ALL.cv$abund_group[ALL.cv$mean > 0.001 & ALL.cv$mean <= 0.01] <- "0.1% to 1%"
+ALL.cv$abund_group[ALL.cv$mean > 0.01 & ALL.cv$mean <= 0.05] <- "1% to 5%"
+ALL.cv$abund_group[ALL.cv$mean > 0.05] <- ">5%"
+ALL.cv$abund_group = factor(ALL.cv$abund_group, levels=c("<0.01%", "0.01% to 0.1%", "0.1% to 1%", "1% to 5%", ">5%"))
+#remove Species with mean = 0
+ALL.cv0 = subset(ALL.cv, mean > 0)
+
+ALL.cv0.bar = ddply(ALL.cv0, ~abund_group+RepType, function(x) c(mean=mean(x$cv), sd = sd(x$cv), se = sd(x$cv)/sqrt(nrow(x))))
+
+#Add alpha variable for facet plotting
+ALL.cv0$alpha.lane = ifelse(ALL.cv0$RepType == 'lane', 1, 0.3)
+ALL.cv0$alpha.run = ifelse(ALL.cv0$RepType == 'run', 1, 0.3)
+ALL.cv0$alpha.pcr = ifelse(ALL.cv0$RepType == 'pcr', 1, 0.3)
+ALL.cv0$alpha.ext = ifelse(ALL.cv0$RepType == 'extraction', 1, 0.3)
+
+ 
+
+#plots
+##point
+p1 = ggplot(ALL.cv0, aes(mean, cv, color=RepType)) +
+  geom_point(aes(alpha=alpha.lane)) + 
+  scale_x_log10() +
+  scale_y_log10() +
+  ylim(0,10)
+##bar
+ggplot(ALL.cv0.bar, aes(RepType, mean, fill=RepType)) +
+  geom_bar(stat='identity') + 
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se), width=0.2) +
+  facet_wrap(~abund_group, nrow=1) +
+  ylab('Average Coefficient of Variance') + 
+  xlab('Technical Replicate Type') +
+  guides(fill=guide_legend(title="Technical Replicate\nType")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values=fresh_swap)
+
+```
