@@ -3,6 +3,7 @@
 
 
 ##Introduction
+The Diabetes Prediction and Prevention (DIPP) study (http://dipp.utu.fi/index.php?mid=2&language=en)....
 
 ##Explanation of Contents
 
