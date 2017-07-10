@@ -48,7 +48,8 @@ The input data for ```3C_Statistical_Analysis_Microbiome.Rmd```. It contains the
 
 All RMarkdown files were executed from Rstudio with the following session information:
 
-```R version 3.3.2 (2016-10-31)
+```
+R version 3.3.2 (2016-10-31)
 Platform: x86_64-apple-darwin13.4.0 (64-bit)
 Running under: macOS Sierra 10.12.5
 
@@ -71,4 +72,5 @@ loaded via a namespace (and not attached):
 [31] Biobase_2.34.0      data.table_1.10.4   survival_2.41-3     rmarkdown_1.4       magrittr_1.5        backports_1.0.5    
 [37] htmltools_0.3.5     MASS_7.3-45         scales_0.4.1        codetools_0.2-15    BiocGenerics_0.20.0 splines_3.3.2      
 [43] biomformat_1.2.0    colorspace_1.3-2    ape_4.1             labeling_0.3        stringi_1.1.3       lazyeval_0.2.0     
-[49] munsell_0.4.3      ```
+[49] munsell_0.4.3      
+```
