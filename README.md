@@ -11,14 +11,14 @@ The Diabetes Prediction and Prevention (DIPP) study (http://dipp.utu.fi/index.ph
 
 This directory contains intermediate files that are called in ```D3C_Statistical_Analysis_Microbiome.Rmd``` which take a bit of time to generate. It is not necessary to call these files and they can be regenerated from the .Rmd file by switching the corresponding chunk options to ```eval=TRUE```. They are provided to speed up execution of the .Rmd file. A brief description of each file is provided:
 
-- **WUF.dist.all.Rdata**
-- **WUF.dist.oulu.Rdata**
-- **WUF.dist.tampere.Rdata**
-- **WUF.dist.turku.Rdata**
-- **dipp_NB.Rdata**
-- **dipp_UUF.Rdata**
-- **dipp_WUF.Rdata**
-- **gg_13_8.97_otus.tree**
+- **WUF.dist.all.Rdata** sample-wise, weighted Unifrac distance matrix (1494x1494) for all samples in the study.
+- **WUF.dist.oulu.Rdata** sample-wise, weighted Unifrac distance matrix (193x193) for samples collected in Oulu.
+- **WUF.dist.tampere.Rdata** sample-wise, weighted Unifrac distance matrix (493x493) for samples collected in Tampere.
+- **WUF.dist.turku.Rdata** sample-wise, weighted Unifrac distance matrix (808x808) for samples collected in Turku.
+- **dipp_NB.Rdata** MDS object resulting from ```plot_ordination``` function provided by the *phyloseq* package using Bray-Curtis dissimilarity and NMDS method; used to generate plots.
+- **dipp_UUF.Rdata** PCoA object resulting from ```plot_ordination``` function provided by the *phyloseq* package using unweighted Unifrac distance and PCoA method; used to generate plots.
+- **dipp_WUF.Rdata** PCoA object resulting from ```plot_ordination``` function provided by the *phyloseq* package using weighted Unifrac distance and PCoA method; used to generate plots.
+- **gg_13_8.97_otus.tree** GreenGenes v13.8 taxonomic tree used to calculate unifrac distances. File is hosted by Qiime (http://qiime.org/home_static/dataFiles.html).
 
 ### D3C2.0_TechReps.pdf/.Rmd
 
