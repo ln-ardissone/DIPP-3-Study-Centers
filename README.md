@@ -3,7 +3,7 @@
 
 ## Introduction
 
-The Diabetes Prediction and Prevention (DIPP) study (http://dipp.utu.fi/index.php?mid=2&language=en)....
+This repository is intended to serve as a source of the data and R code used to analyze the DIPP 3 Study Centers project with the aim of transparency and open access to reviewers and anyone else interested. This project analyzed the microbiota (based on 16S rRNA (V4) sequencing) of a subset of children who participated in the DIPP study, with the main objective of identifying taxa associated with islet autoimmunity. The DIPP (Diabetes Prediction and Prevention) study included children with genetic predisposition to type 1 diabetes from 3 different study centers across Finland (Oulu, Tampere, and Turku). More information regarding the study can be found at http://dipp.utu.fi/index.php?mid=2&language=en. 
 
 ## Explanation of Contents
 
